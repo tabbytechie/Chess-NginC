@@ -54,5 +54,17 @@ services:
     depends_on:
       - api
 
+  # Lightweight web DB admin (Adminer) — convenience UI only; not for prod.
+  adminer:
+    image: adminer:4
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "${ADMINER_PORT:-8090}:8080"
+
 volumes:
   pgdata:

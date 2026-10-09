@@ -58,7 +58,7 @@ export default function Dashboard() {
 
   return (
     <main>
-      <header>
+      <header className="dashboard-header">
         <h1>Chess</h1>
         <p>
           Signed in as <strong>{user?.email}</strong>{' '}

@@ -1,0 +1,9 @@
+# Ignore BuildKit build context for the web image.
+node_modules
+dist
+.pnp
+.pnp.js
+*.log
+.DS_Store
+Dockerfile
+.git
