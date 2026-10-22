@@ -18,15 +18,19 @@ dependencies = [
     "alembic>=1.14",
     "bcrypt>=4.1",
     "python-chess>=1.10",
+    # Engine provider seam: the remote Stockfish sidecar client (Phase 2).
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
+    "pytest-cov>=6",
     "hypothesis>=6.120",
     "httpx>=0.28",
     "ruff>=0.8",
     "mypy>=1.13",
+    "pip-audit>=2.7",
 ]
 
 [tool.setuptools.packages.find]

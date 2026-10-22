@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from app.engine.domain import EngineDifficulty, EngineResult
 from app.games.domain import Color
 
 
@@ -55,9 +56,27 @@ class AnalyseRequest:
 
 
 class EngineProvider(Protocol):
-    """Pluggable analysis provider (ANL-001)."""
+    """Pluggable engine backend (ANL-001).
 
-    name: str
+    One seam for both jobs: play (``move_for``) and review (``analyse``). The
+    game service only ever depends on this protocol, never on Stockfish, the
+    sidecar, or the custom engine directly.
+    """
+
+    @property
+    def name(self) -> str:
+        """Stable identifier for the backend (provenance and logging)."""
+        ...
+
+    def move_for(self, fen: str, *, level: EngineDifficulty) -> EngineResult:
+        """Return a bounded best move for the side to move in ``fen``.
+
+        ``level`` maps to a server-side search budget; the concrete backend
+        still clamps it to its own hard bounds. Raises
+        :class:`app.engine.errors.EngineUnavailableError` when the backend
+        cannot produce a move so the caller can fall back.
+        """
+        ...
 
     def analyse(self, request: AnalyseRequest) -> AnalysisResult:
         """Analyse a position, returning ranked principal variations."""

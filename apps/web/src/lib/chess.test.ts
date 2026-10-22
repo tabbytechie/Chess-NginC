@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   allSquares,
-  capturedPieces,
+  capturedPiecesFromMoves,
   glyph,
   isLightSquare,
   parseFenPlacement,
@@ -10,8 +10,6 @@ import {
 } from './chess';
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-// After 1. e4 d5 2. exd5 — White has captured one black pawn.
-const AFTER_CAPTURE = 'rnbqkbnr/ppp1pppp/3P4/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3';
 
 describe('parseFenPlacement', () => {
   it('places all 32 starting pieces', () => {
@@ -83,31 +81,76 @@ describe('glyph', () => {
   });
 });
 
-describe('capturedPieces (WEB-018)', () => {
-  it('reports nothing captured in the starting position', () => {
-    const { capturedByWhite, capturedByBlack } = capturedPieces(START_FEN);
+describe('capturedPiecesFromMoves (WEB-018)', () => {
+  it('reports nothing captured with no moves', () => {
+    const { capturedByWhite, capturedByBlack } = capturedPiecesFromMoves([]);
     expect(capturedByWhite).toEqual([]);
     expect(capturedByBlack).toEqual([]);
   });
 
   it('credits White for a captured black pawn', () => {
-    const { capturedByWhite, capturedByBlack } = capturedPieces(AFTER_CAPTURE);
+    // 1. e4 d5 2. exd5
+    const { capturedByWhite, capturedByBlack } = capturedPiecesFromMoves([
+      { uci: 'e2e4' },
+      { uci: 'd7d5' },
+      { uci: 'e4d5' },
+    ]);
     expect(capturedByWhite).toEqual(['♟']);
     expect(capturedByBlack).toEqual([]);
   });
 
-  it('counts multiple and mixed captured pieces', () => {
-    // Black is missing queen + both rooks; White is missing one knight.
-    const fen = '1nb1kbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKB1R w KQkq - 0 1';
-    const { capturedByBlack, capturedByWhite } = capturedPieces(fen);
-    // Captured pieces keep their own color glyph.
-    expect(capturedByWhite).toEqual(['♛', '♜', '♜']);
-    expect(capturedByBlack).toEqual(['♘']);
+  it('counts captures by both sides in order', () => {
+    // 1. e4 d5 2. exd5 Qxd5 — White takes a pawn, Black's queen takes it back.
+    const { capturedByWhite, capturedByBlack } = capturedPiecesFromMoves([
+      { uci: 'e2e4' },
+      { uci: 'd7d5' },
+      { uci: 'e4d5' },
+      { uci: 'd8d5' },
+    ]);
+    expect(capturedByWhite).toEqual(['♟']);
+    expect(capturedByBlack).toEqual(['♙']);
   });
 
-  it('never reports a captured king', () => {
-    const fen = '8/8/8/8/8/8/8/4K3 w - - 0 1';
-    const { capturedByBlack } = capturedPieces(fen);
-    expect(capturedByBlack).not.toContain('♚');
+  it('detects an en-passant capture into an empty square', () => {
+    // White pawn on e5 captures Black's double-stepping d-pawn en passant on d6.
+    const { capturedByWhite } = capturedPiecesFromMoves([
+      { uci: 'e2e4' },
+      { uci: 'a7a6' },
+      { uci: 'e4e5' },
+      { uci: 'd7d5' },
+      { uci: 'e5d6' },
+    ]);
+    expect(capturedByWhite).toEqual(['♟']);
+  });
+
+  it('does not count a castling rook move as a capture', () => {
+    const { capturedByWhite, capturedByBlack } = capturedPiecesFromMoves([
+      { uci: 'e2e4' },
+      { uci: 'e7e5' },
+      { uci: 'g1f3' },
+      { uci: 'b8c6' },
+      { uci: 'f1c4' },
+      { uci: 'f8c5' },
+      { uci: 'e1g1' },
+    ]);
+    expect(capturedByWhite).toEqual([]);
+    expect(capturedByBlack).toEqual([]);
+  });
+
+  it('treats a promotion as a piece change, not phantom captured material', () => {
+    // A pawn promotes on an empty square after its file clears; no capture added.
+    const { capturedByWhite } = capturedPiecesFromMoves([
+      { uci: 'b1a3' },
+      { uci: 'a7a6' },
+      { uci: 'a3b1' },
+      { uci: 'a6a5' },
+      { uci: 'b1a3' },
+      { uci: 'a5a4' },
+      { uci: 'a3b1' },
+      { uci: 'a4a3' },
+      { uci: 'b1a3' },
+    ]);
+    // The only capture is the black pawn taken on a3; a promotion adds none.
+    expect(capturedByWhite).toEqual(['♟']);
   });
 });

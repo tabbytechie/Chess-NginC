@@ -1,11 +1,11 @@
 # Project Plan & Roadmap
 
-> Version 0.1 — last updated 2026-10-09
+> Version 0.2 — last updated 2026-10-22
 > This plan is the operational roadmap. It mirrors `PROJECT_CHECKLIST.md`, which is the authoritative status tracker.
 
 ## Objective
 
-Build a browser-based chess application: standard chess, player-vs-computer, local two-player, a custom Python chess AI, Stockfish benchmarking, user accounts, PostgreSQL persistence, saved games/move history, and a responsive React + TypeScript frontend — delivered through verified, incremental loops.
+Build a browser-based chess application: standard chess, player-vs-computer against **Stockfish**, local two-player, user accounts with recovery, PostgreSQL persistence, saved games/move history, and a responsive React + TypeScript frontend — delivered through verified, incremental loops. A hand-written Python engine remains as the degraded fallback behind the `EngineProvider` seam.
 
 ## Guiding principles
 
@@ -32,23 +32,37 @@ Build a browser-based chess application: standard chess, player-vs-computer, loc
 - Address any **P0** defect before adding features.
 - Do not start Phase 6 (AI) until Phase 1 (rules) is stable.
 - Do not start Phase 7 (Stockfish) until the engine interface (AI-001..AI-003) exists.
-- `SEC-018` (email verification) and `SEC-019` (password reset) are deferred but **must** land before public registration.
+- `SEC-018` (email verification) and `SEC-019` (password reset) shipped in the
+  account-recovery work (Phase 4), behind a sender abstraction; `ConsoleEmailSender`
+  is the default so dev needs no mail config.
 
-## Immediate next tasks (backlog order)
+## Current roadmap — Product-Complete MVP
 
-1. **FND-011/.gitignore + FND-012/.env.example** — protect secrets before any code lands. *(P0)*
-2. **FND-013..FND-017** — backend (`pyproject.toml`, Ruff, mypy, pytest) and frontend (`package.json`, tsconfig strict, ESLint, Prettier, Vitest) toolchains.
-3. **FND-003** — create the real directory scaffold (`apps/web`, `apps/api`, `docs`, `infra`, etc.) once tooling exists, then FND-004..FND-010 docs.
-4. **CHS-001..CHS-024** — chess rules domain behind a `ChessRules` adapter over python-chess.
+The foundational milestones (M0–M6) are complete. The active effort is the
+seven-phase **Product-Complete MVP roadmap** (plan file
+`Product-complete_MVP_roadmap`), which took the codebase from a correct-but-not-a-
+product state to a shipped game loop. Each phase has a hard exit gate; a phase is
+not started until the previous gate is green.
 
-## Environment reality check (2026-10-09)
+| Phase | Theme | Exit gate (all green) |
+|---|---|---|
+| 0 | Unblock the dev loop | fresh clone → README run → non-destructive `pytest` |
+| 1 | Atomic persistence core | unit of work + conditional update; threaded contention test; `alembic check` |
+| 2 | Stockfish sidecar + provider seam | tactical suite for all providers; killed sidecar degrades, never 500 |
+| 3 | Real game loop | sign-up → play as black on hard → auto-reply → mate recorded → resume → PGN |
+| 4 | Auth & security | hashed tokens, proxy-aware limits, CSRF, recovery flow; security tests |
+| 5 | Deployment & CI | composed stack, non-root, coverage floor, audits, Playwright e2e |
+| 6 | A11y, code splitting, OpenAPI, docs | board keyboard-accessible; generated types + drift check; docs truth pass |
+
+## Environment reality check (2026-10-22)
 
 | Tool | Status | Impact |
 |------|--------|--------|
-| Python 3.14.2 | ✅ present | Backend & engine OK |
-| Node v25.2.1 / npm 11.7.0 | ✅ present | Frontend OK |
-| pnpm | ❌ not installed | Use npm, or install pnpm |
-| Docker | ❌ not installed | FND-018/019 need Docker or a local Postgres; document either path |
-| PostgreSQL 14.19 | psql client only | Server/connection unverified; FND-019 must be checked |
+| Python 3.14 (project venv) | ✅ present | Backend & engine OK |
+| Node 20+ / npm | ✅ present | Frontend OK |
+| Docker | ✅ installed | Full `docker compose up` path works; images/e2e run in CI |
+| PostgreSQL 18 (compose) / local 14 | ✅ reachable | Tests run against a throwaway `chess_test` DB; dev DB is guarded against |
 
-> **Decision:** proceed with npm unless pnpm is added; document Docker vs. local-Postgres for local dev in `docs/architecture.md` and `README.md`.
+> **Decision:** the containerised path (`docker compose up`) is the primary quick
+> start; local processes remain documented for iterating on one side. `pnpm` is
+> not used — the frontend is npm.

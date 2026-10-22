@@ -49,10 +49,18 @@ Write the minimum maintainable implementation.
 
 Run applicable checks after every meaningful change.
 
-**Backend:** Ruff lint → Ruff format check → type check → relevant pytest → integration tests (when DB/API changes).
-**Frontend:** ESLint → Prettier check → `tsc` → Vitest → production build → Playwright (critical flows).
+**Backend:** Ruff lint → Ruff format check → type check (`mypy app`) → relevant
+pytest → integration tests (when DB/API changes). CI also enforces a **coverage
+floor** (`pytest --cov-fail-under`), `pip-audit`, migration **reversibility**
+(`upgrade → downgrade -1 → upgrade → check`), the **OpenAPI export drift** check
+(`python scripts/export-openapi.py` then `git diff --exit-code`), and
+`python scripts/check-checklist.py`.
+**Frontend:** ESLint → **Prettier check** → `tsc` → Vitest → production build →
+the **generated-types drift** check (`npm run check:api`) → Playwright e2e
+against the composed stack for critical flows.
 **Database:** migration validation → constraint validation → transaction tests → persistence/recovery tests.
-**AI:** legal-move validation → terminal-position tests → timeout tests → benchmark regression tests.
+**AI:** legal-move validation → terminal-position tests → timeout tests → the
+`tactic` regression suite across every provider → benchmark regression tests.
 
 - Never run destructive tests against production data.
 - On failure: capture the actual error, find the root cause, fix before proceeding.
@@ -98,7 +106,7 @@ If a relevant test fails:
 
 ## Definition of Done (gate)
 
-A feature is done only when: implementation exists; acceptance criteria satisfied; tests passed; no critical regression; quality checks pass; security/authorization reviewed; docs updated; checklist has evidence; limitations documented; change reviewed.
+A feature is done only when: implementation exists; acceptance criteria satisfied; tests passed (within the coverage floor); no critical regression; every CI gate green (lint/format/types/audits/migration-reversibility/OpenAPI drift/prettier/e2e/checklist-count); security/authorization reviewed; docs updated; checklist has evidence; limitations documented; change reviewed.
 
 ## Session protocol
 

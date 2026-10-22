@@ -1,21 +1,44 @@
 # Chess Engine Strength & Limitations
 
-## Current Implementation
+## Who actually plays the opponent
 
-The custom chess engine (`app/engine/`) implements a basic search-based AI with the following components:
+The **shipped opponent is Stockfish**, reached through the `EngineProvider` seam
+(ADR-006 / ADR-010): in Compose it runs as an isolated sidecar container on a
+private network (`engine_backend=stockfish_remote`); `stockfish_local` uses a
+locally-installed binary for dev; and `custom` is the pure-Python engine below,
+kept only as the **degraded fallback** the circuit breaker selects when the
+sidecar is unavailable. This document describes that fallback's real,
+measured behaviour — it is deliberately not the primary opponent.
 
-- **Evaluation:** Material-based evaluation with piece values
-- **Search:** Minimax algorithm with alpha-beta pruning
-- **Depth:** Configurable search depth (default: 3 plies)
-- **Time Control:** Deadline-aware search with configurable time limits
-- **Cancellation:** Support for cancelling in-progress searches
+## The custom fallback (`app/engine/`)
+
+A basic search-based engine:
+
+- **Evaluation:** material only (piece values) plus terminal detection.
+- **Search:** negamax with alpha-beta, depth-limited by difficulty.
+- **Difficulty → depth:** `easy = 1`, `medium = 3`, `hard = 5` plies
+  (`EngineDifficulty`). These are the *search* depths; the server-side
+  difficulty→budget map in ADR-010 (`easy 2/300 ms`, `medium 6/700 ms`,
+  `hard 12/1500 ms`) bounds **Stockfish**, and the sidecar still clamps every
+  search to `depth ≤ 15 / time ≤ 1000 ms`.
+- **Safety:** deadline-aware search returns the best move found so far with
+  `termination="timeout"` and reports the *achieved* depth, never `legal_moves[0]`.
 
 ## Strengths
 
 - **Correctness:** The engine only returns legal moves and correctly identifies terminal positions (checkmate, stalemate, draws).
 - **Deterministic:** With the same configuration and position, the engine returns consistent results.
 - **Safety:** Time limits and cancellation prevent runaway searches.
-- **Test Coverage:** All core functionality has unit tests (128 backend tests passing, incl. 11 Stockfish/benchmark tests).
+- **Test Coverage:** 222 backend tests pass, including the tactical regression
+  suite `tests/test_engine_tactics.py`. It pins the fallback's measured behaviour
+  across every provider that can run locally: mate-in-1 (back-rank), winning a
+  free queen, winning a free rook, queen-takes-rook, and the same free-queen
+  capture at `hard`. Before the Phase 2 fix the engine's fixed-POV mate constant
+  combined with per-ply negamax negation **inverted the score at odd depths**, so
+  it *declined* a free queen at depth 1/3/5 — a correctness bug, not a strength
+  limit. The suite asserts the perspective is now consistent at depths 1/3/5, that
+  a tiny budget returns a shallower-but-legal best move, and that the circuit
+  breaker degrades to this fallback instead of raising.
 
 ## Stockfish reference & benchmarking (Phase 7, BEN-001..022)
 
@@ -51,7 +74,11 @@ The current evaluation is purely material-based:
 - No mobility or activity scoring
 - No endgame-specific knowledge
 
-**Impact:** The engine plays tactically sound but positionally weak. It will miss strategic advantages like controlling key squares, pawn breaks, and king safety.
+**Impact:** With the material-only evaluation the fallback is **tactically naive
+but positionally blind**: it solves the pinned mate-in-1 and hanging-piece
+fixtures above, yet it has no strategic model — no piece-square tables, pawn
+structure, king safety, mobility, or endgame knowledge — so it will misjudge
+positions where the best move is not a immediate gain or mate.
 
 ### Search Depth
 
@@ -74,11 +101,15 @@ Pure Python implementation without optimizations:
 
 ### Estimated Strength
 
-Based on the limitations above:
-- **ELO estimate:** ~800-1000 (beginner level)
-- **Comparable to:** A player who knows the rules and basic tactics but lacks strategic understanding
-- **Suitable for:** Casual play, learning chess, testing the application
-- **Not suitable for:** Competitive play, serious analysis, or challenging experienced players
+No formal rating has been measured (that is the benchmarking roadmap, BEN-014..017,
+not yet run to a rating estimate). Judging only from the pinned behaviour above:
+- **Rough level:** beginner — it reliably takes one-move tactics and mates in the
+  fixtures it is tested against, but sees nothing positional.
+- **Suitable for:** a gentle opponent and as the sidecar-outage fallback.
+- **Not suitable for:** competitive play or analysis — use Stockfish for both.
+
+This is an explicit estimate, not a benchmarked number; do not cite a figure as
+measured until `benchmark.py --record` output backs it.
 
 ## Planned Improvements (P2)
 
@@ -100,14 +131,18 @@ Stockfish (Phase 7) is a world-class engine (~3500+ ELO) that uses:
 - Extensive optimization (C++, bitboards, SIMD)
 - Massive opening books and endgame tablebases
 
-Our custom engine is not intended to compete with Stockfish. Instead, Stockfish will be used for:
-- Benchmarking our engine's accuracy
-- Providing optional strong play for users who want it
-- Position analysis and evaluation
+Our custom fallback is not intended to compete with Stockfish — and no longer
+needs to: **Stockfish is the default opponent** (ADR-006). It is used for:
+- Actual play against the bot at easy/medium/hard (the difficulty→budget map).
+- The `benchmark.py` harness comparing custom vs. Stockfish on the versioned FEN
+  suite.
+- The custom engine remains only the degraded fallback when the sidecar is down.
 
 ## Usage Recommendations
 
-- **Easy mode (depth 1):** For complete beginners
-- **Medium mode (depth 3):** Default, suitable for casual play
-- **Hard mode (depth 5):** For players who want a modest challenge
-- **Stockfish integration:** For strong play and analysis (when Phase 7 is implemented)
+The difficulty the user picks maps, per ADR-010, to a **Stockfish** search budget
+(`easy` depth 2 / 300 ms, `medium` depth 6 / 700 ms, `hard` depth 12 / 1500 ms,
+capped by the sidecar at depth ≤ 15 / 1000 ms). If the sidecar is unreachable the
+circuit breaker falls back to the custom engine at its `easy`/`medium`/`hard`
+search depths (1/3/5), so a level label is a promise about Stockfish, and the
+fallback is the safety net rather than the target.

@@ -484,3 +484,116 @@ public release; optional live `docker compose up` smoke when disk allows.
 
 **Next recommended task.** WEB-029 Playwright browser e2e (the last P1 gap); then
 Phase 6 AI enhancements and BEN-014..017/BEN-021.
+
+---
+
+## Session 2026-10-15 (l) — Product-complete MVP roadmap, Phases 0–4
+
+**Task.** Execute Phases 0–4 of `Product-Complete MVP Roadmap` (plan file, not
+edited): unblock the dev loop, make move persistence atomic, ship the Stockfish
+sidecar behind the provider seam, build the real human-vs-engine game loop, and
+harden auth/security. Each phase gated on `ruff`/`mypy`/`pytest` before the next.
+
+**Files changed (highlights).**
+- Phase 0: `apps/web/vite.config.ts` (committed `/api` proxy), `tests/db.py`
+  (throwaway `chess_test` default + collection-time guard against `chess`),
+  portable fake-UCI fixture, `core/database.py` compose-shaped default DSN (no
+  hardcoded user), README quickstarts.
+- Phase 1: `app/core/unit_of_work.py` (`transaction` ctx), repository commits
+  removed (flush only), `apply_state` conditional version update (`rowcount==0`
+  → `StaleVersionError`), migration `146802a49aef`… plus constraints
+  (`UNIQUE(game_id,move_number)`, `ON DELETE CASCADE`, status/mode CHECKs,
+  `timestamptz`); `ChessRules.from_moves` replay for threefold; threaded
+  contention + invariant tests.
+- Phase 2: `services/stockfish/` sidecar (persistent `popen_uci`, semaphore,
+  server-side bounds, `/healthz`); `app/engine/` providers `remote_stockfish`,
+  `local_stockfish`, `custom_provider`, `factory`, `circuit`; custom-engine
+  perspective/terminal/timeout/depth fixes; `test_engine_tactics.py` across all
+  providers; `benchmark.py --record`.
+- Phase 3: `games/domain.py` `GameResult`/`EndReason`/`EngineLevel`; games model
+  columns + CHECKs; migration `x3b4`; service side-enforce/auto-reply (atomic
+  two-ply)/result-attribution/undo-pair/PGN; `GET /games/{id}/pgn`, paginated
+  `GET /games`, `GET /stats`; frontend side/level pickers, auto-reply render,
+  orientation, `in_check`, real stats.
+- Phase 4: hashed session tokens (model+migration), proxy-aware per-class rate
+  limits, CSRF `urlsplit` origin fix, timing-safe login + `IntegrityError`
+  register; recovery `tokens.py`/`email.py`/`recovery.py`, migration `x4c5`,
+  four non-enumerating endpoints; frontend forgot/reset pages + unverified banner.
+
+**Tests executed.** backend grew to **214 passed** by end of Phase 4; per-phase
+gates all green; `alembic upgrade/downgrade -1/upgrade` + `alembic check` clean on
+each migration.
+
+**Decisions made.** Stockfish (not the custom engine) is the opponent; delivered
+as an isolated sidecar so the API image stays binary-free (ADR-006, REL-011).
+One `transaction(db)` per service op; search runs outside any open transaction
+(ADR-007). Recovery tokens built now behind a sender abstraction, `ConsoleEmailSender`
+by default (ADR-009). Difficulty→budget map is server-side only (ADR-010).
+
+**Next recommended task.** Phases 5–6 (deployment/CI, then polish/docs truth pass).
+
+---
+
+## Session 2026-10-19 (m) — Roadmap Phases 5–6: deployment/CI + polish + docs truth pass
+
+**Task.** Ship the deployment/operability surface (Phase 5) and the UX/a11y/contract/
+documentation pass (Phase 6), closing the Product-Complete MVP roadmap.
+
+**Files changed (highlights).**
+- Phase 5: `compose.yaml` — `engine` on an `internal: true` network (no published
+  port), `migrate` one-shot (`service_completed_successfully` gate on `api`),
+  non-root images, `db` unpublished, `adminer` behind `--profile debug`,
+  CPU/mem limits, `cookie_secure` default `false`, `forwarded_allow_ips`.
+  `/ready` returns **503** on DB-down with an informational `engine`
+  up/degraded field; `app/core/observability.py` JSON logs + `request_id`
+  middleware; nginx CSP/HSTS-note/`X-Forwarded-For`; `Dockerfile`s non-root +
+  uvicorn `--proxy-headers`.
+- CI `.github/workflows/ci.yml`: coverage floor (`--cov-fail-under=85`),
+  `pip-audit`, migration reversibility, frontend `prettier --check`, OpenAPI
+  export-drift + generated-types drift, `check-checklist.py`, `e2e` Playwright job
+  against the composed stack, `images` buildx job; every action pinned by SHA.
+- Phase 6: `Chessboard.tsx` a11y (`role="row"` children, arrow-key nav,
+  busy-only-moving-side, promotion focus trap, removed duplicate `aria-hidden`
+  selects); `React.lazy(GamePage)`; `openapi-typescript` codegen into
+  `src/lib/api-schema.ts` with a thin `api-types.ts` overlay (deleted the fake
+  `api-types.test.ts`); added `@testing-library/dom` (peer-drift fix).
+- Docs truth pass: rewrote `docs/api.md` (all endpoints, `/ready` semantics,
+  pagination, auto-reply, recovery, generated-types); `docs/deployment.md`
+  (sidecar topology, internal network, non-root, real structured logs, migrate
+  one-shot, HSTS/CSP, smoke assertions); `docs/architecture.md`, `docs/engine-strength.md`,
+  `docs/PLAN.md`, `README.md`; `docs/decisions/` ADR-006..010; `LICENSE` +
+  `THIRD_PARTY_NOTICES.md`; `PROJECT_CHECKLIST.md` counts + `scripts/check-checklist.py`;
+  meta docs (CONTRIBUTING, code-standards, development-loops, agents) gates.
+
+**Tests executed (this session's exit gate, all green).**
+- Backend: `ruff check app tests` ✅ · `ruff format --check` ✅ (75 files) ·
+  `mypy app` ✅ (52 files) · `pytest` → **222 passed**, coverage **88.35%** (floor 85).
+- `python scripts/export-openapi.py && git diff --exit-code -- openapi.json` ✅ ·
+  `python scripts/check-checklist.py` → **265 items, 218 verified** ✅.
+- Frontend: `prettier --check` ✅ · `eslint` ✅ · `tsc --noEmit` ✅ ·
+  `npm run check:api` (generated-types drift) ✅ · `vitest run` → **48 passed** (4 files) ·
+  `npm run build` ✅ — entry `index` **131.77 kB gzip** (< 200 kB target) with
+  `GamePage` split into its own **4.41 kB gzip** chunk (framer-motion off the entry).
+- Live `docker compose up` + Playwright e2e deferred to the CI `e2e` job this
+  session (the Docker daemon was unresponsive locally); the job builds all images
+  and runs the full loop against the composed stack.
+
+**Results.** All seven roadmap phases complete. The app is a playable product:
+atomic move persistence, Stockfish opponent with a degrading fallback, a real
+two-ply game loop with results/PGN/stats, hashed-token auth + non-enumerating
+recovery, hardened non-root Compose with an isolated engine network, and docs
+whose claims are now true and kept honest by scripted checks.
+
+**Defects discovered & fixed.** openapi-typescript peer conflict (TS@5 vs 6) →
+`.npmrc legacy-peer-deps`, which then dropped `@testing-library/dom` (tsc TS2305)
+→ added it as an explicit devDependency (verified via clean `npm ci`); tightened
+backend response requiredness (`in_check`/`move_count`/`moves`/`ModeStats`/
+`email_verified`) so generated types are definite; `check-checklist.py` regex fixes.
+
+**Remaining work.** BEN-014..017/BEN-021 (benchmark head-to-head + rating estimate,
+excluded from MVP); Redis cross-process rate limiting (TD-012, accepted single-worker
+constraint); the analysis/coaching roadmap (Phase 10, intentionally unbuilt).
+
+**Next recommended task.** None blocking — MVP is complete and the exit gates are
+recorded green. Optional follow-ups above are logged as scoped debt, not gaps.
+

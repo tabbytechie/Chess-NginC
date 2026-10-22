@@ -9,7 +9,7 @@ from alembic import context
 # Import Base and all models for autogenerate support.
 # Models must be imported (not just Base) so their tables are
 # registered on Base.metadata before autogenerate inspects it.
-from app.core.database import Base
+from app.core.database import Base, settings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -31,18 +31,23 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """Resolve the DB URL: env var wins, else alembic.ini (REL-001/REL-006).
+    """Resolve the DB URL: env var wins, then app settings, then alembic.ini.
 
     Production deploys inject ``DATABASE_URL``/``database_url`` (managed Postgres,
     the ``db`` service in compose). Migrations must target *that* database, not
     the hardcoded dev URL in ``alembic.ini`` — otherwise the app and migrations
-    would point at different schemas. Falls back to the ini value for bare runs.
+    would point at different schemas.
+
+    Falling back to ``settings.database_url`` keeps a single source of truth for
+    local runs: it honours both the environment and ``apps/api/.env``, so
+    ``alembic upgrade head`` can never migrate a different database than the one
+    the API is serving (REL-006).
     """
     # Prefer an injected DSN (compose sets lowercase `database_url`; pydantic-settings
     # is case-insensitive so `DATABASE_URL` works too). noqa: honoring the lowercase
     # compose var is intentional (REL-001).
     url = os.environ.get("DATABASE_URL") or os.environ.get("database_url")  # noqa: SIM112
-    return url or config.get_main_option("sqlalchemy.url") or ""
+    return url or settings.database_url or config.get_main_option("sqlalchemy.url") or ""
 
 
 def run_migrations_offline() -> None:

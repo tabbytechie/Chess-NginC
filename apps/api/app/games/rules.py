@@ -19,6 +19,22 @@ class ChessRules:
         self._board = chess.Board(position)
 
     @classmethod
+    def from_moves(cls, ucis: list[str], start_fen: str = STARTING_FEN) -> "ChessRules":
+        """Rebuild a position by replaying ``ucis`` from ``start_fen``.
+
+        A board constructed from a FEN alone carries no move history, so
+        python-chess can never see a threefold repetition on it. Every persisted
+        game keeps its full UCI history, which makes replay the correct way to
+        evaluate status, repetition, and draw claims (CHS-014).
+
+        Raises :class:`InvalidMoveError` / :class:`IllegalMoveError` if the
+        stored history does not reproduce a legal game.
+        """
+        rules = cls(start_fen)
+        rules.replay_moves(ucis)
+        return rules
+
+    @classmethod
     def initial_fen(cls) -> str:
         """Return the FEN of the standard starting position."""
         return STARTING_FEN
@@ -73,6 +89,41 @@ class ChessRules:
     def is_check(self) -> bool:
         return self._board.is_check()
 
+    def fen_board(self) -> chess.Board:
+        """A fresh, independent board for the current position.
+
+        Search code pushes and pops moves on whatever board it is handed. This
+        hands out a copy so engine exploration can never corrupt the history
+        this object is keeping (that history is what makes threefold repetition
+        detectable), while `rules.py` stays the only module importing `chess`.
+        """
+        return chess.Board(self.fen)
+
+    def is_checkmate(self) -> bool:
+        return self._board.is_checkmate()
+
+    def is_stalemate(self) -> bool:
+        return self._board.is_stalemate()
+
+    def is_insufficient_material(self) -> bool:
+        return self._board.is_insufficient_material()
+
+    def is_fifty_moves(self) -> bool:
+        """Whether the fifty-move rule has actually advanced far enough."""
+        return self._board.is_fifty_moves()
+
+    def can_claim_draw(self) -> bool:
+        """Whether the rules allow a draw claim right now (CHS-014)."""
+        return self._board.can_claim_draw()
+
+    def is_repetition(self, times: int = 3) -> bool:
+        """Whether the current position has occurred ``times`` times.
+
+        Only meaningful on a board built by replaying moves; a FEN-only board
+        has no history to compare against.
+        """
+        return self._board.is_repetition(times)
+
     def status(self) -> GameStatus:
         """Derive the game status from the current position."""
         if self._board.is_checkmate():
@@ -81,7 +132,8 @@ class ChessRules:
             return GameStatus.STALEMATE
         if self._board.is_insufficient_material():
             return GameStatus.DRAW
-        # Fifty-move rule and threefold repetition (CHS-014).
+        # Fifty-move rule and threefold repetition (CHS-014). Requires the
+        # replayed move history — see ChessRules.from_moves.
         if self._board.can_claim_draw():
             return GameStatus.DRAW
         return GameStatus.ACTIVE

@@ -2,9 +2,11 @@
 #
 # Usage:  docker compose -f compose.yaml -f compose.dev.yaml up --build
 #
-# Adds the Stockfish binary (installed from distro packages in the dev image) so
-# engine moves and benchmarks work locally. The production compose file is unchanged
-# and stays binary-free (GPL-3.0, REL-011).
+# Builds the dev API image (which installs the Stockfish binary from distro
+# packages) and points the API at that local binary instead of the sidecar, so
+# the full engine path works offline. The production compose file is unchanged
+# and stays binary-free (GPL-3.0, REL-011). The sidecar service still comes up
+# (compose keeps the base `depends_on`), it is simply not used here.
 #
 # Note: compose merges `services` by name; only keys set here are overridden.
 services:
@@ -13,7 +15,8 @@ services:
       context: ./apps/api
       dockerfile: Dockerfile.dev
     environment:
+      ENGINE_BACKEND: stockfish_local
       # Debian/Ubuntu place the stockfish binary here, which is NOT on PATH.
       # Uses explicit $VAR form so it is read from .env; set STOCKFISH_PATH in
       # .env to override (e.g. a locally-built binary).
-      stockfish_path: ${STOCKFISH_PATH:-/usr/games/stockfish}
+      STOCKFISH_PATH: ${STOCKFISH_PATH:-/usr/games/stockfish}

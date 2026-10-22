@@ -18,6 +18,13 @@ function game(overrides: Partial<GameResponse> = {}): GameResponse {
     status: 'active',
     fen: START_FEN,
     version: 1,
+    player_color: 'white',
+    engine_level: 'medium',
+    result: '*',
+    winner: null,
+    end_reason: null,
+    in_check: false,
+    move_count: 0,
     moves: [],
     ...overrides,
   };
@@ -25,7 +32,7 @@ function game(overrides: Partial<GameResponse> = {}): GameResponse {
 
 function renderGame(path = '/games/7') {
   const user = userEvent.setup();
-  vi.spyOn(api, 'me').mockResolvedValue({ id: 1, email: 'a@b.co' });
+  vi.spyOn(api, 'me').mockResolvedValue({ id: 1, email: 'a@b.co', email_verified: true });
   // Each test spies `getGame` before calling this so load states are explicit.
   const view = render(
     <MemoryRouter initialEntries={[path]}>
@@ -213,117 +220,98 @@ describe('GamePage promotion (WEB-015)', () => {
   });
 });
 
-describe('GamePage status and engine (WEB-013/014/020/021)', () => {
+describe('GamePage status and result banner (WEB-013/014)', () => {
   it('announces checkmate as game over and locks controls', async () => {
     vi.spyOn(api, 'getGame').mockResolvedValue(
       game({
         status: 'checkmate',
+        result: '0-1',
+        winner: 'black',
+        end_reason: 'checkmate',
         fen: 'rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3',
       }),
     );
     renderGame('/games/7');
 
     expect(await screen.findByText(/Checkmate/)).toBeInTheDocument();
+    // The banner shows the real result, phrased from White's (player) view.
+    expect(screen.getByText(/you lost/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Resign' })).toBeDisabled();
   });
 
   it('announces stalemate as a draw', async () => {
     vi.spyOn(api, 'getGame').mockResolvedValue(
-      game({ status: 'stalemate', fen: 'k7/8/1Q6/8/8/8/8/K7 b - - 0 1' }),
+      game({ status: 'stalemate', result: '1/2-1/2', fen: 'k7/8/1Q6/8/8/8/8/K7 b - - 0 1' }),
     );
     renderGame('/games/7');
 
     expect(await screen.findByText(/Stalemate/)).toBeInTheDocument();
+    expect(screen.getByText(/Result: draw/)).toBeInTheDocument();
   });
 
-  it('offers an engine move in computer mode', async () => {
-    const engineMove = vi.spyOn(api, 'engineMove').mockResolvedValue(game({ version: 2 }));
-    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer' }));
-    const { user } = renderGame('/games/7');
-
-    await user.click(await screen.findByRole('button', { name: /Engine move/ }));
-
-    expect(engineMove).toHaveBeenCalledWith(7, {
-      expected_version: 1,
-      max_depth: 3,
-      max_time_ms: 2000,
-    });
-  });
-
-  it('hides the engine move button in local mode', async () => {
-    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'local' }));
+  it('renders a check flag from the server in_check field, not the FEN', async () => {
+    vi.spyOn(api, 'getGame').mockResolvedValue(
+      game({
+        fen: 'rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2',
+        in_check: true,
+      }),
+    );
     renderGame('/games/7');
 
-    await screen.findByRole('heading', { name: /Game #7/ });
-    expect(screen.queryByRole('button', { name: /Engine move/ })).not.toBeInTheDocument();
+    expect(await screen.findByText(/check!/)).toBeInTheDocument();
   });
 });
 
-describe('GamePage status, promotion and engine (WEB-013/015/020/021)', () => {
-  it('asks which piece to promote to, then sends the chosen letter', async () => {
-    const submit = vi.spyOn(api, 'submitMove').mockResolvedValue(game({ version: 2 }));
-    // White pawn on b7 ready to promote on a8.
-    vi.spyOn(api, 'getGame').mockResolvedValue(
-      game({ fen: '1nb1kbn1/1P1ppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }),
-    );
-    const { user } = renderGame('/games/7');
+describe('GamePage computer auto-reply (Phase 3)', () => {
+  it('has no manual engine-move button', async () => {
+    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer' }));
+    renderGame('/games/7');
 
-    await clickMove(user, 'b7', 'a8');
-
-    // The dialog appears before any request is sent.
-    const dialog = await screen.findByRole('dialog');
-    expect(submit).not.toHaveBeenCalled();
-
-    await user.click(within(dialog).getByRole('button', { name: /promote to n/i }));
-
-    expect(submit).toHaveBeenCalledWith(7, { uci: 'b7a8n', expected_version: 1 });
+    await screen.findByRole('heading', { name: /Game #7/ });
+    expect(screen.queryByRole('button', { name: /Engine move/i })).not.toBeInTheDocument();
   });
 
-  it('announces checkmate as game over and locks controls', async () => {
-    vi.spyOn(api, 'getGame').mockResolvedValue(
+  it('renders the engine reply from the single move response', async () => {
+    // A human e2e4 plus Stockfish's e7e5 come back together in one response.
+    const submit = vi.spyOn(api, 'submitMove').mockResolvedValue(
       game({
-        status: 'checkmate',
-        fen: 'rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3',
+        mode: 'computer',
+        fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1',
+        version: 3,
+        move_count: 2,
+        moves: [
+          { uci: 'e2e4', san: 'e4', move_number: 1 },
+          { uci: 'e7e5', san: 'e5', move_number: 1 },
+        ],
       }),
     );
-    renderGame('/games/7');
-
-    expect(await screen.findByText(/Checkmate/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Resign' })).toBeDisabled();
-  });
-
-  it('announces stalemate as a draw', async () => {
-    vi.spyOn(api, 'getGame').mockResolvedValue(
-      game({ status: 'stalemate', fen: 'k7/8/1Q6/8/8/8/8/K7 b - - 0 1' }),
-    );
-    renderGame('/games/7');
-    expect(await screen.findByText(/Stalemate/)).toBeInTheDocument();
-  });
-
-  it('offers an engine move in computer mode', async () => {
-    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer' }));
-    renderGame('/games/7');
-    expect(await screen.findByRole('button', { name: /Engine move/ })).toBeInTheDocument();
-  });
-
-  it('hides the engine move button in local mode', async () => {
-    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'local' }));
-    renderGame('/games/7');
-    await screen.findByRole('heading', { name: /Game #7/ });
-    expect(screen.queryByRole('button', { name: /Engine move/ })).not.toBeInTheDocument();
-  });
-
-  it('requests an engine move at the chosen depth', async () => {
-    const engineMove = vi.spyOn(api, 'engineMove').mockResolvedValue(game({ version: 2 }));
-    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer' }));
+    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer', player_color: 'white' }));
     const { user } = renderGame('/games/7');
 
-    await user.click(await screen.findByRole('button', { name: /Engine move/ }));
+    await clickMove(user, 'e2', 'e4');
 
-    expect(engineMove).toHaveBeenCalledWith(7, {
-      expected_version: 1,
-      max_depth: 3,
-      max_time_ms: 2000,
-    });
+    expect(submit).toHaveBeenCalledWith(7, { uci: 'e2e4', expected_version: 1 });
+    const history = await screen.findByRole('list', { name: 'move history' });
+    expect(history).toHaveTextContent('e4');
+    expect(history).toHaveTextContent('e5');
+  });
+
+  it('orients the board for a Black player', async () => {
+    vi.spyOn(api, 'getGame').mockResolvedValue(game({ mode: 'computer', player_color: 'black' }));
+    renderGame('/games/7');
+    await screen.findByRole('heading', { name: /Game #7/ });
+
+    // Flipped: the top-left cell is h1 and the bottom-right is a8.
+    const cells = screen.getAllByRole('gridcell');
+    expect(cells[0]).toHaveAccessibleName(/^h1,/);
+    expect(cells[cells.length - 1]).toHaveAccessibleName(/^a8,/);
+  });
+
+  it('offers a PGN download for the game', async () => {
+    vi.spyOn(api, 'getGame').mockResolvedValue(game());
+    renderGame('/games/7');
+
+    const link = await screen.findByRole('link', { name: /Download PGN/i });
+    expect(link).toHaveAttribute('href', expect.stringContaining('/api/v1/games/7/pgn'));
   });
 });

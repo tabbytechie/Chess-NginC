@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.clock import utc_now
 from app.core.database import Base
 
 
@@ -21,4 +22,6 @@ class BenchmarkRun(Base):
     stockfish_time_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     stockfish_version: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     hardware: Mapped[str] = mapped_column(Text, nullable=False, default="")  # BEN-011
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

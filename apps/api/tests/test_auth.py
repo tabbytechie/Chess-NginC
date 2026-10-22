@@ -1,13 +1,15 @@
 """Auth tests: registration, login, sessions, cookies, rate limits (SEC-001..021)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth.security import hash_token
 from app.auth.validators import normalize_email
+from app.core.clock import utc_now
 from app.models.session import Session as SessionModel
 
 
@@ -105,9 +107,10 @@ def test_expired_session_rejected(client: TestClient, db: Session) -> None:
     _register(client, email="exp@example.com")
     token = client.cookies.get("session_token")
     assert token
-    stmt = select(SessionModel).where(SessionModel.token == token)
+    # The DB stores a digest, never the raw token (SEC-021): look it up by hash.
+    stmt = select(SessionModel).where(SessionModel.token_hash == hash_token(token))
     sess = db.execute(stmt).scalar_one()
-    sess.expires_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=1)
+    sess.expires_at = utc_now() - timedelta(seconds=1)
     db.commit()
     assert client.get("/api/v1/auth/me").status_code == 401
 

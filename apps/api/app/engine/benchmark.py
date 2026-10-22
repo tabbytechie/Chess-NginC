@@ -1,18 +1,23 @@
 """Benchmark harness: run custom engine vs reference on identical positions.
 
 BEN-010..013: identical positions, recorded config/hardware, recorded
-move/score/depth/nodes/time, normalized mate scores. Pure harness — no HTTP
-or DB here; persistence lives in the service layer (BEN-019).
+move/score/depth/nodes/time, normalized mate scores. The harness itself is pure;
+:func:`run_suite` aggregates a versioned suite and :func:`record_run` is the
+BEN-019 writer that persists provenance (provider name, version, bounds, host)
+through the engine seam into ``benchmark_runs`` / ``benchmark_results``.
 """
 
 from __future__ import annotations
 
+import argparse
 import platform
 import time
 from dataclasses import dataclass
 
 import chess
+from sqlalchemy.orm import Session
 
+from app.engine.benchmark_suite import BENCHMARK_SUITE_VERSION, get_suite
 from app.engine.domain import EngineConfig
 from app.engine.engine import ChessEngine
 from app.engine.stockfish import (
@@ -24,6 +29,8 @@ from app.engine.stockfish import (
     analyse_position,
 )
 from app.games.domain import Color
+from app.models.benchmark_result import BenchmarkResult
+from app.models.benchmark_run import BenchmarkRun
 
 
 @dataclass(frozen=True)
@@ -129,3 +136,114 @@ def mean_score_gap(comparisons: tuple[PositionComparison, ...]) -> float:
     if not comparisons:
         return 0.0
     return sum(c.score_gap_cp for c in comparisons) / len(comparisons)
+
+
+def run_suite(
+    custom_config: EngineConfig | None = None,
+    reference_config: StockfishConfig | None = None,
+) -> BenchmarkRunResult:
+    """Run every position in the versioned suite through both engines (BEN-009)."""
+    comparisons = tuple(
+        compare_position(fen, custom_config, reference_config) for fen, _desc in get_suite()
+    )
+    return BenchmarkRunResult(
+        suite_version=BENCHMARK_SUITE_VERSION,
+        comparisons=comparisons,
+        hardware=hardware_fingerprint(),
+        stockfish_version=stockfish_version_label(),
+    )
+
+
+def record_run(
+    db: Session,
+    result: BenchmarkRunResult,
+    *,
+    custom_config: EngineConfig,
+    reference_config: StockfishConfig,
+    provider_name: str = "stockfish",
+    commit: bool = True,
+) -> BenchmarkRun:
+    """Persist one run + its per-position rows (BEN-019).
+
+    Provenance is captured in the existing columns — no schema change: the
+    reference backend's *name and version* share ``stockfish_version``, the
+    *bounds* live in the custom/reference depth/time columns, and the *host* in
+    ``hardware``. ``provider_name`` is the seam identity that produced the
+    reference moves, so a future backend swap is traceable from the data.
+    """
+    run = BenchmarkRun(
+        suite_version=result.suite_version,
+        custom_depth=custom_config.max_depth,
+        custom_time_ms=custom_config.max_time_ms,
+        stockfish_depth=reference_config.max_depth,
+        stockfish_time_ms=reference_config.max_time_ms,
+        stockfish_version=f"{provider_name} / {result.stockfish_version}",
+        hardware=result.hardware,
+    )
+    db.add(run)
+    db.flush()  # assign run.id before referencing it from the result rows
+    for comp in result.comparisons:
+        db.add(
+            BenchmarkResult(
+                run_id=run.id,
+                fen=comp.fen,
+                custom_move=comp.custom_move,
+                custom_score=comp.custom_score,
+                custom_depth=comp.custom_depth,
+                custom_nodes=comp.custom_nodes,
+                custom_time_ms=comp.custom_time_ms,
+                reference_move=comp.reference_move,
+                reference_score=comp.reference_score,
+                reference_depth=comp.reference_depth,
+                moves_agree=1 if comp.moves_agree else 0,
+            )
+        )
+    if commit:
+        db.commit()
+    return run
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: run the suite and print metrics; ``--record`` persists provenance."""
+    parser = argparse.ArgumentParser(description="Run the benchmark suite (BEN-019)")
+    parser.add_argument("--record", action="store_true", help="persist the run to the database")
+    parser.add_argument("--provider", default="stockfish", help="reference backend identity")
+    parser.add_argument("--depth", type=int, default=None, help="override search depth for both")
+    parser.add_argument("--time-ms", dest="time_ms", type=int, default=None, help="time budget")
+    args = parser.parse_args(argv)
+
+    custom_config = EngineConfig(max_depth=args.depth or 3, max_time_ms=args.time_ms or 5000)
+    reference_config = StockfishConfig(
+        max_depth=args.depth or 10,
+        max_time_ms=args.time_ms or 500,
+    )
+
+    result = run_suite(custom_config, reference_config)
+    agreement = agreement_rate(result.comparisons)
+    gap = mean_score_gap(result.comparisons)
+    print(
+        f"suite {result.suite_version}: {len(result.comparisons)} positions, "
+        f"agreement={agreement:.2f}, mean_gap={gap:.1f}cp"
+    )
+
+    if args.record:
+        # Import here so the pure harness (and its tests) need no DB at import.
+        from app.core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            run = record_run(
+                db,
+                result,
+                custom_config=custom_config,
+                reference_config=reference_config,
+                provider_name=args.provider,
+            )
+            print(f"recorded benchmark run id={run.id}")
+        finally:
+            db.close()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry
+    raise SystemExit(main())

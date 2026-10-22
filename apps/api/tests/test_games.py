@@ -28,7 +28,9 @@ def test_create_list_get_game(authed_client: tuple[TestClient, dict]) -> None:
 
     listed = client.get("/api/v1/games")
     assert listed.status_code == 200
-    assert [g["id"] for g in listed.json()] == [game["id"]]
+    payload = listed.json()
+    assert [g["id"] for g in payload["items"]] == [game["id"]]
+    assert payload["total"] == 1
 
     fetched = client.get(f"/api/v1/games/{game['id']}")
     assert fetched.status_code == 200
@@ -44,7 +46,7 @@ def test_cross_account_isolation(
     client, _ = authed_client
     game = _create(client)
     assert other_client.get(f"/api/v1/games/{game['id']}").status_code == 404
-    assert other_client.get("/api/v1/games").json() == []
+    assert other_client.get("/api/v1/games").json()["items"] == []
     other_move = other_client.post(
         f"/api/v1/games/{game['id']}/moves",
         json={"uci": "e2e4", "expected_version": 1},
@@ -132,12 +134,15 @@ def test_engine_move(authed_client: tuple[TestClient, dict]) -> None:
     assert refused.status_code == 422
 
     gid = _create(client, mode="computer")["id"]
-    client.post(f"/api/v1/games/{gid}/moves", json={"uci": "e2e4", "expected_version": 1})
-    resp = client.post(
-        f"/api/v1/games/{gid}/engine-move",
-        json={"expected_version": 2, "max_depth": 1, "max_time_ms": 500},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["version"] == 3
+    # A computer game starts on the player's turn, so a bare engine-move is
+    # refused: the loop replies automatically, this route only fills a gap.
+    early = client.post(f"/api/v1/games/{gid}/engine-move", json={"expected_version": 1})
+    assert early.status_code == 422
+
+    # Submitting a human move now returns both plies in one response.
+    moved = client.post(f"/api/v1/games/{gid}/moves", json={"uci": "e2e4", "expected_version": 1})
+    assert moved.status_code == 200, moved.text
+    body = moved.json()
+    assert body["version"] == 3  # human ply + auto engine reply
     assert len(body["moves"]) == 2
+    assert body["moves"][0]["uci"] == "e2e4"

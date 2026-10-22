@@ -16,6 +16,20 @@
 
 Each role operates through the same LOOP A–H machine. Roles are responsibilities, not silos — a single agent may wear several hats, but code must stay separated by module.
 
+### Shared constraints (every brief)
+
+- **All CI gates must be green** before reporting done: lint/format, `mypy`,
+  pytest **within the coverage floor**, `pip-audit`, migration reversibility,
+  the OpenAPI **export + generated-types drift** checks (`export-openapi.py` /
+  `npm run check:api`), frontend `prettier --check`, Playwright e2e, and
+  `python scripts/check-checklist.py`.
+- **Never run against the developer `chess` DB** — tests use a throwaway database.
+- **Paths with spaces:** the repo directory name has a space; never embed an
+  interpolated interpreter path in a one-line shebang or unquoted shell command —
+  pass `sys.executable` as a separate argument and quote paths.
+- **Contracts are generated, not hand-typed:** frontend API types come from the
+  backend `openapi.json`; a schema change must re-export it or CI fails on the diff.
+
 ---
 
 ## Brief: Architect / Tech Lead
@@ -38,10 +52,18 @@ Each role operates through the same LOOP A–H machine. Roles are responsibiliti
 
 ## Brief: Chess-Engine Developer
 
-**Objective.** Build the custom search engine behind the `ChessEngine` interface.
-**Tasks.** Implement evaluation → minimax → alpha-beta → move ordering → iterative deepening → deadline/cancellation, one improvement at a time. Always validate returned moves; handle terminal positions first; keep a consistent score perspective.
-**Exit.** Engine returns a legal, in-budget move with structured result (move, score, depth, nodes, elapsed).
-**Guardrails.** Pure Python; no HTTP, no DB, no filesystem; benchmark before/after each optimization.
+**Objective.** Build the search/evaluation behind the `EngineProvider` seam.
+**Tasks.** Ship Stockfish as the isolated sidecar opponent (`RemoteStockfishProvider`
+on the private network; bounds re-applied server-side) with `LocalStockfishProvider`
+for dev and the pure-Python `ChessEngine` as the circuit-breaker fallback. Implement
+evaluation → negamax → alpha-beta → deadline/cancellation, one improvement at a
+time. Always validate returned moves; handle terminal positions first; keep a
+consistent score perspective; report achieved (not nominal) depth.
+**Exit.** Provider returns a legal, in-budget move with a structured result (move,
+score, depth, nodes, elapsed); the tactic suite passes across every provider; a dead
+sidecar degrades to the fallback and never 500s.
+**Guardrails.** No HTTP-to-the-client or DB access in engine code; never hold an
+open transaction during a search; benchmark before/after each optimization.
 
 ## Brief: Frontend Engineer
 

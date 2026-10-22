@@ -5,7 +5,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules'] },
+  { ignores: ['dist', 'node_modules', 'src/lib/api-schema.ts'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   reactHooks.configs.flat['recommended-latest'],
@@ -20,6 +20,14 @@ export default tseslint.config(
     },
     rules: {
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
+    },
+  },
+  {
+    // Playwright config + e2e specs run under Node, not the browser.
+    files: ['playwright.config.ts', 'e2e/**/*.{ts,tsx}'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: globals.node,
     },
   },
 );

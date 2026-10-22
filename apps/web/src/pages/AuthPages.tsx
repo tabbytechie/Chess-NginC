@@ -92,12 +92,19 @@ export function RegisterPage() {
 
 export function LoginPage() {
   const { login } = useAuth();
+  const location = useLocation();
+  const notice = (location.state as { notice?: string } | null)?.notice;
   const form = useAuthForm(login);
   return (
     <main className="auth">
       <div className="auth-card">
         <h1>Log in</h1>
         <p className="u-muted mb-lg">Welcome back to the board</p>
+        {notice && (
+          <p role="status" className="auth-note">
+            {notice}
+          </p>
+        )}
         <form onSubmit={form.onSubmit} aria-label="login form">
           <div className="field">
             <label htmlFor="login-email">Email</label>
@@ -132,6 +139,11 @@ export function LoginPage() {
             {form.busy ? 'Logging in…' : 'Log in'}
           </Button>
         </form>
+        <p className="mt-md">
+          <Link to="/forgot-password" className="text-neon-blue hover:text-neon-pink">
+            Forgot password?
+          </Link>
+        </p>
         <p className="mt-lg">
           New here?{' '}
           <Link to="/register" className="text-neon-blue hover:text-neon-pink">

@@ -1,3 +1,20 @@
+name: chess-nginc
+
+networks:
+  # web <-> api. Reachable from the host only through the published web port.
+  frontend: {}
+  # api <-> db <-> migrate. The database is never published to the host.
+  backend: {}
+  # api <-> Stockfish sidecar. `internal` means no internet egress in or out:
+  # the sidecar is reachable only by the API on this private network, which is
+  # its sole access control (no auth, no DB) and keeps Stockfish out of the API
+  # image (REL-011 / ADR-006).
+  engine:
+    internal: true
+
+volumes:
+  pgdata:
+
 services:
   db:
     image: postgres:18-alpine
@@ -6,18 +23,62 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-chess_engine}
       POSTGRES_USER: ${POSTGRES_USER:-chess}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       # PG 18+ stores data under /var/lib/postgresql (subdir), not .../data.
       # Mount the parent so the image's layout/upgrade path is preserved.
       - pgdata:/var/lib/postgresql
       - ./backups:/backups
+    networks: [backend]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chess} -d ${POSTGRES_DB:-chess_engine}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    # No published port: reachable only on the private `backend` network. For
+    # manual psql/Adminer access bring up the `debug` override
+    # (docker compose -f compose.yaml -f compose.debug.yaml --profile debug up).
+
+  # One-shot migration step, decoupled from serving (REL-006). Runs to
+  # completion; `api` waits for it to exit 0 before starting.
+  migrate:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      database_url: postgresql+psycopg://${POSTGRES_USER:-chess}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-chess_engine}
+      secret_key: ${SECRET_KEY:?set SECRET_KEY in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  engine:
+    build:
+      context: ./services/stockfish
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks: [engine]
+    # Port is NOT published: only the API on the `engine` network can reach it.
+    expose:
+      - "8050"
+    environment:
+      MAX_CONCURRENT_SEARCHES: ${ENGINE_SIDECAR_MAX_CONCURRENCY:-4}
+      ENGINE_THREADS: ${ENGINE_SIDECAR_THREADS:-1}
+      ENGINE_HASH_MB: ${ENGINE_SIDECAR_HASH_MB:-64}
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
 
   api:
     build:
@@ -27,36 +88,55 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      engine:
+        condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-production}
       database_url: postgresql+psycopg://${POSTGRES_USER:-chess}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-chess_engine}
       secret_key: ${SECRET_KEY:?set SECRET_KEY in .env}
-      cookie_secure: ${COOKIE_SECURE:-true}
+      # Plain HTTP behind nginx by default; set true only with TLS termination.
+      cookie_secure: ${COOKIE_SECURE:-false}
       cors_origins: ${CORS_ORIGINS:?set CORS_ORIGINS in .env}
-      stockfish_path: ${STOCKFISH_PATH:-}
+      # The docker bridge range nginx shares with the API; uvicorn and the
+      # limiter both trust X-Forwarded-For only from these peers (SEC-012).
+      forwarded_allow_ips: ${FORWARDED_ALLOW_IPS:-172.16.0.0/12}
+      # Production opponent is the private sidecar (ADR-006), not a local binary.
+      engine_backend: ${ENGINE_BACKEND:-stockfish_remote}
+      engine_base_url: ${ENGINE_BASE_URL:-http://engine:8050}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "${API_PORT:-8000}:8000"
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    networks: [backend, engine, frontend]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)\""]
       interval: 15s
       timeout: 10s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   web:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
     restart: unless-stopped
+    # nginx-unprivileged listens on 8080 (non-root). Map the host port to it.
     ports:
-      - "${WEB_PORT:-5173}:80"
+      - "${WEB_PORT:-5173}:8080"
+    networks: [frontend]
     depends_on:
       - api
 
-  # Lightweight web DB admin (Adminer) — convenience UI only; not for prod.
+  # Web DB admin (Adminer) — a convenience UI that must never start by default
+  # (SEC: it is an attack surface). Enable with `--profile debug`.
   adminer:
     image: adminer:4
+    profiles: ["debug"]
     restart: unless-stopped
     depends_on:
       db:
@@ -65,6 +145,4 @@ services:
       ADMINER_DEFAULT_SERVER: db
     ports:
       - "${ADMINER_PORT:-8090}:8080"
-
-volumes:
-  pgdata:
+    networks: [backend]

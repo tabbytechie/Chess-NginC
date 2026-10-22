@@ -1,3 +1,5 @@
 node_modules
 dist
 package-lock.json
+# Auto-generated from the backend OpenAPI contract; not hand-formatted.
+src/lib/api-schema.ts

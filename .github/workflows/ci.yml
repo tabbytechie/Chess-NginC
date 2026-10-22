@@ -1,9 +1,15 @@
-name: CI — backend & frontend gates (REL-010, QA-005..009)
+name: CI — backend, frontend, images, e2e (REL-010, QA-005..009)
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# Actions are pinned by full commit SHA, not a moving tag (supply-chain hygiene).
+# Refs noted inline; update deliberately, never `@latest`.
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
 
 jobs:
   backend:
@@ -12,19 +18,23 @@ jobs:
       postgres:
         image: postgres:18-alpine
         env:
-          POSTGRES_DB: chess
-          POSTGRES_USER: tabbymichael
+          # Throwaway database name on purpose: the suite drops every table
+          # between tests, so CI must never point at a shared/dev-shaped DB.
+          POSTGRES_DB: chess_test
+          POSTGRES_USER: chess
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U tabbymichael -d chess"
+          --health-cmd "pg_isready -U chess -d chess_test"
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
       - name: Install backend
         run: |
           cd apps/api
@@ -39,33 +49,65 @@ jobs:
         run: |
           cd apps/api
           mypy app
-      - name: Migrate
+      - name: OpenAPI contract drift
+        # The committed openapi.json is the frontend's codegen input; a schema
+        # change that forgot to re-run the export fails here.
+        run: |
+          cd apps/api
+          python scripts/export-openapi.py
+          git diff --exit-code -- openapi.json
+      - name: Dependency audit
+        run: |
+          cd apps/api
+          pip-audit
+      - name: Migration reversibility + drift
         env:
-          database_url: postgresql+psycopg://tabbymichael:postgres@localhost:5432/chess
+          database_url: postgresql+psycopg://chess:postgres@localhost:5432/chess_test
         run: |
           cd apps/api
           alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
           alembic check
-      - name: Tests
+      - name: Tests + coverage
         env:
-          database_url: postgresql+psycopg://tabbymichael:postgres@localhost:5432/chess
+          database_url: postgresql+psycopg://chess:postgres@localhost:5432/chess_test
         run: |
           cd apps/api
-          pytest
+          # Floor set from the measured baseline (88%), rounded down for drift;
+          # ratchet upward as coverage improves.
+          pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=85
+      - name: Upload coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-xml
+          path: apps/api/coverage.xml
+      - name: Checklist counts honest
+        run: python scripts/check-checklist.py
 
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - name: Install frontend
         run: |
           cd apps/web
           npm ci
+      - name: OpenAPI types drift
+        # Regenerate api-schema.ts from the committed contract and fail on any
+        # diff — this is the real API-022 check that replaced the fake type test.
+        run: |
+          cd apps/web
+          npm run check:api
+      - name: Format check
+        run: |
+          cd apps/web
+          npm run format:check
       - name: Lint + types + tests + build
         run: |
           cd apps/web
@@ -73,3 +115,73 @@ jobs:
           npx tsc --noEmit
           npm run test:run
           npm run build
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build api
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: apps/api
+          load: true
+          tags: chess-api:ci
+      - name: Smoke the api image (migrations ship intact)
+        # `alembic heads` proves the migration files are present and importable
+        # without needing a live DB — a cheap boot check for the built image.
+        run: docker run --rm chess-api:ci alembic heads
+      - name: Build web
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: apps/web
+          tags: chess-web:ci
+      - name: Build engine sidecar
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: services/stockfish
+          tags: chess-engine:ci
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    env:
+      POSTGRES_PASSWORD: e2e-password
+      SECRET_KEY: e2e-secret-key-not-placeholder
+      CORS_ORIGINS: http://localhost:5173
+      APP_ENV: production
+      WEB_PORT: "5173"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Build and start the composed stack
+        run: |
+          docker compose up -d --build
+          echo "waiting for the web edge to serve…"
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:5173/ >/dev/null; then echo "web up"; break; fi
+            sleep 2
+          done
+          docker compose ps
+      - name: Install Playwright browsers
+        run: |
+          cd apps/web
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run end-to-end tests
+        run: |
+          cd apps/web
+          E2E_BASE_URL=http://localhost:5173 npx playwright test
+      - name: Upload Playwright trace on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: playwright-trace
+          path: apps/web/test-results
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

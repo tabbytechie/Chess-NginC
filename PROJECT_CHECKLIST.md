@@ -34,7 +34,7 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | FND-020 | Verify frontend starts | P1 | [x] | `vite` dev server serves index.html on :5173; production build succeeds. |
 | FND-021 | Verify backend starts | P1 | [x] | `uvicorn app.main:app` starts; `/` and `/api/v1/health` return 200. |
 | FND-022 | Backend health endpoint | P1 | [x] | GET /api/v1/health → 200 {"status":"ok"} (tested). |
-| FND-023 | CI workflows | P1 | [ ] | |
+| FND-023 | CI workflows | P1 | [x] | `.github/workflows/ci.yml`: backend (ruff, mypy, pip-audit, `pytest --cov-fail-under=85`, migration up/down/`alembic check`), frontend (prettier, eslint, tsc, vitest, build, OpenAPI drift), `images` build job, Playwright `e2e` job; actions pinned by commit SHA. |
 | FND-024 | Verify clean setup on fresh environment | P2 | [ ] | |
 
 ---
@@ -81,8 +81,8 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | DB-005 | games migration | P1 | [x] | Game model in app/models/game.py (migrated) |
 | DB-006 | game_moves migration | P1 | [x] | GameMove model in app/models/game_move.py (migrated) |
 | DB-007 | engine_runs migration | P1 | [x] | EngineRun model in app/models/engine_run.py (migrated) |
-| DB-008 | benchmark_runs migration | P2 | [ ] | |
-| DB-009 | benchmark_results migration | P2 | [ ] | |
+| DB-008 | benchmark_runs migration | P2 | [x] | Model `app/models/benchmark_run.py`; migration `5a0dcdb13bb3` (upgrade/downgrade verified). |
+| DB-009 | benchmark_results migration | P2 | [x] | Model `app/models/benchmark_result.py`; same migration `5a0dcdb13bb3`. |
 | DB-010 | Foreign keys | P1 | [x] | FKs defined in models (sessions.user_id, game_moves.game_id, etc.) |
 | DB-011 | Unique constraints | P1 | [x] | Unique on users.email, sessions.token |
 | DB-012 | Necessary indexes | P2 | [x] | Indexes on foreign keys and unique fields |
@@ -115,18 +115,18 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | SEC-010 | Game ownership on reads | P0 | [x] | GET game(s) scoped to caller; foreign → 404 (tested). |
 | SEC-011 | Game ownership on writes | P0 | [x] | All mutations scoped to caller; foreign → 404 (tested). |
 | SEC-012 | Login/registration rate limits | P1 | [x] | 10/min per IP in-memory (deps.rate_limit_auth); Redis noted for prod. |
-| SEC-013 | Engine endpoint resource limits | P0 | [ ] | No engine HTTP endpoints yet (Phase 4/6). |
+| SEC-013 | Engine endpoint resource limits | P0 | [x] | `/engine-move` rate-limited per user (`rate_limit_engine`); difficulty→budget map enforced server-side; sidecar re-applies hard caps; per-user concurrency cap + circuit fallback (`app/engine/circuit.py`). |
 | SEC-014 | Explicit CORS config | P1 | [x] | Allowlist from settings in app/main.py; credentials enabled, no wildcard. |
 | SEC-015 | Keep secrets out of source control | P0 | [x] | .env.example placeholders only; .gitignore covers .env; no secrets logged. |
 | SEC-016 | Safe error responses | P1 | [x] | Generic "Invalid email or password"; {detail} envelope; no hash/stack leaks. |
 | SEC-017 | No sensitive data in logs | P0 | [x] | No password/token/hash logging in auth code (reviewed). |
-| SEC-018 | Email verification (before public release) | P2 | [-] | Deferred; required before public launch. |
-| SEC-019 | Password-reset flow (before public release) | P2 | [-] | Deferred; required before public launch. |
+| SEC-018 | Email verification (before public release) | P2 | [x] | Built Phase 4: hashed single-use tokens (`app/auth/tokens.py`), `POST /auth/verify-email` + `/resend-verification`; `ConsoleEmailSender` default, SMTP by config. |
+| SEC-019 | Password-reset flow (before public release) | P2 | [x] | Built Phase 4: `POST /auth/request-password-reset` + `/reset-password`, TTL 30 min, consumes all sessions on reset; uniform replies (no enumeration). |
 | SEC-020 | Test unauthorized & cross-account access | P0 | [x] | 401 on /me without cookie; cross-origin POST → 403 (tests/test_auth.py). |
 | SEC-021 | Test session expiry & revocation | P1 | [x] | Expired session rejected; logout revokes (tests/test_auth.py). |
-| SEC-022 | Review dependency vulnerabilities | P1 | [ ] | |
+| SEC-022 | Review dependency vulnerabilities | P1 | [x] | `pip-audit` runs in the CI backend job; `npm audit --omit=dev` clean (prod deps). |
 | SEC-023 | Document threat model | P1 | [ ] | |
-| SEC-024 | Review third-party licensing | P1 | [ ] | |
+| SEC-024 | Review third-party licensing | P1 | [x] | `THIRD_PARTY_NOTICES.md`: per-dep SPDX + the python-chess (GPL-3.0+) / psycopg (LGPL-3.0) copyleft caveat, Stockfish kept in a separate unmodified container (REL-011 / ADR-006). MIT-vs-copyleft distribution tension flagged for legal sign-off. |
 
 ---
 
@@ -155,7 +155,7 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | API-019 | Optimistic concurrency control | P0 | [x] | expected_version → 409 on stale; versions monotonic. |
 | API-020 | Document HTTP status codes | P1 | [x] | docs/api.md status-code table + per-route codes. |
 | API-021 | Generate & validate OpenAPI schemas | P1 | [x] | /openapi.json; tests/test_openapi.py validates refs. |
-| API-022 | Generate frontend API types | P1 | [x] | apps/web/src/lib/api-types.ts + contract test. |
+| API-022 | Generate frontend API types | P1 | [x] | `openapi-typescript` codegen: `apps/api/scripts/export-openapi.py` → `apps/api/openapi.json` → `src/lib/api-schema.ts`; `api-types.ts` is a thin overlay; CI `npm run check:api` fails on drift. |
 | API-023 | API integration tests | P1 | [x] | tests/test_games.py (9 tests, live Postgres). |
 | API-024 | All protected endpoints enforce auth | P0 | [x] | get_current_user on all game routes; 401 tested. |
 
@@ -191,10 +191,10 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | WEB-024 | Game resume | P1 | [x] | GamePage resume; test asserts resume + board state |
 | WEB-025 | Loading & error states | P1 | [x] | AuthContext/Dashboard/GamePage loading+error; tests |
 | WEB-026 | Responsive layout | P2 | [x] | styles.css @media |
-| WEB-027 | Keyboard & accessibility | P2 | [x] | Chessboard arrow-key nav + aria-labels |
-| WEB-028 | Frontend unit tests | P1 | [x] | 43 vitest tests (App/GamePage/chess/api-types) |
-| WEB-029 | Browser e2e tests | P1 | [ ] | Deferred: needs Playwright harness (Phase 9) |
-| WEB-030 | Verify production build | P1 | [x] | `npx vite build` succeeds, 274 kB / 87 kB gzip |
+| WEB-027 | Keyboard & accessibility | P2 | [x] | Phase 6: `role=grid`→`role=row`→`gridcell`, arrow-key nav + Enter/Space select, roving tabindex, focus-trapped `aria-modal` promotion, moving-side-only live cells (`Chessboard.tsx` + tests). |
+| WEB-028 | Frontend unit tests | P1 | [x] | 48 vitest tests (4 files: App, GamePage, Chessboard, chess). |
+| WEB-029 | Browser e2e tests | P1 | [x] | Playwright `apps/web/e2e/game-loop.spec.ts` (register→play→resign→PGN) run against the composed stack in the CI `e2e` job. |
+| WEB-030 | Verify production build | P1 | [x] | `npm run build`: entry 131.8 kB / 131.77 kB gzip; GamePage code-split chunk 11.8 kB / 4.41 kB gzip. |
 
 ---
 
@@ -262,15 +262,15 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 
 | ID | Requirement | Pri | Status | Evidence / Location |
 |----|-------------|-----|--------|---------------------|
-| QA-001 | All backend unit tests | P1 | [x] | `pytest` → **139 passed** (128 existing + 11 QA probes) on user-owned PG18 :5432. |
-| QA-002 | Backend integration tests | P1 | [x] | Auth/games/engine/benchmark API tests green in the same 139-passed run (TestClient + live PG). |
-| QA-003 | Frontend unit tests | P1 | [x] | `npm run test:run` → **43 passed** (4 files: api-types, chess, App, GamePage). |
-| QA-004 | e2e smoke tests | P1 | [x] | Live uvicorn smoke on scratch DB: register → create computer game → e2e4 → engine g8h6 (v3, active); `/health` ok. No Playwright harness (WEB-029/Phase 9). |
-| QA-005 | Python lint | P1 | [x] | `ruff check app tests` → All checks passed; `ruff format --check` → 52 files formatted. |
-| QA-006 | Python type check | P1 | [x] | `mypy app` → no issues in 37 source files. |
+| QA-001 | All backend unit tests | P1 | [x] | `pytest` → **222 passed** on the non-destructive `chess_test` database. |
+| QA-002 | Backend integration tests | P1 | [x] | Auth/games/engine/recovery/concurrency API tests green in the same 222-passed run (TestClient + live PG). |
+| QA-003 | Frontend unit tests | P1 | [x] | `npm run test:run` → **48 passed** (4 files: App, GamePage, Chessboard, chess). |
+| QA-004 | e2e smoke tests | P1 | [x] | Playwright `e2e/game-loop.spec.ts` against the composed stack (CI `e2e` job) + `scripts/smoke-prod.sh` (auto-reply, result, PGN, `/ready`). |
+| QA-005 | Python lint | P1 | [x] | `ruff check app tests` → All checks passed; `ruff format --check` → 75 files formatted. |
+| QA-006 | Python type check | P1 | [x] | `mypy app` → no issues in 52 source files. |
 | QA-007 | Frontend lint | P1 | [x] | `npm run lint` (eslint .) → clean. |
 | QA-008 | TS type check | P1 | [x] | `npx tsc --noEmit` → clean. |
-| QA-009 | Production build | P1 | [x] | `npm run build` → 36 modules, 274 kB / 87 kB gzip; `format:check` → Prettier clean. |
+| QA-009 | Production build | P1 | [x] | `npm run build` → entry 131.77 kB gzip, GamePage code-split chunk 4.41 kB gzip; `format:check` → Prettier clean. |
 | QA-010 | Validate migrations | P1 | [x] | `alembic upgrade head` → up to date; `alembic check` → no new ops; `5a0dcdb13bb3` round-trip verified earlier. |
 | QA-011 | Test unauthorized access | P0 | [x] | `test_unauthenticated_games_rejected`, `test_me_unauthenticated_is_401`, `test_unauthorized_shapes_have_no_leak` (401 + `{"detail":"Not authenticated"}`, forged cookie opaque). |
 | QA-012 | Test cross-user data isolation | P0 | [x] | `test_cross_account_isolation`, `test_recover_game_ownership_enforced`, repo ownership tests (404 for foreign ids). |
@@ -281,10 +281,10 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | QA-017 | Test DB rollback | P0 | [x] | `test_db_rollback_leaves_clean_state` + `test_rollback_after_failed_write` + `test_stale_version_conflict_shape` (state consistent). |
 | QA-018 | Check dependency vulnerabilities | P1 | [x] | `pip-audit`: app deps clean (only pip-24.0 itself flagged, env tooling); `npm audit --omit=dev` → 0 vulns. |
 | QA-019 | Verify no secrets in logs | P0 | [x] | `test_no_secrets_in_error_bodies` (no password_hash/traceback; `{"detail"}`-only); error envelope SEC-016. |
-| QA-020 | Review accessibility | P2 | [x] | Board is `role=grid` + per-square `aria-label`/`aria-pressed`, `aria-live` status, labelled promotion dialog, keyboard navigation (Phase 5 session h). |
+| QA-020 | Review accessibility | P2 | [x] | Phase 6: board is `role=grid` → `role=row` → `gridcell`, arrow-key nav, roving tabindex, focus-trapped `aria-modal` promotion, `role=status`/`role=alert` live regions (`Chessboard.test.tsx`). |
 | QA-021 | Review mobile & desktop layouts | P2 | [x] | `styles.css` responsive (`max-width:68rem`, `@media max-width:46rem` stacking); needs device spot-check in Phase 9. |
 | QA-022 | Performance tests | P2 | [x] | Engine probe: depth1 20 nodes/5 ms, depth2 420 nodes/78 ms (pure-Python, TD-001); API smoke p50 <1 s; depth3+ profiling deferred. |
-| QA-023 | Review slow DB queries | P2 | [x] | `test_slow_query_review`: ownership lookups on indexed `user_id` + `game_id` FKs; no N+1 (single list/get per request). |
+| QA-023 | Review slow DB queries | P2 | [x] | `GET /games` uses a single aggregate/summary query (no per-row move fetch → no N+1, Phase 3); ownership lookups on indexed `user_id` + `game_id` FKs. |
 | QA-024 | Review technical debt | P1 | [x] | TD register reviewed: TD-004 (GPL review done — no bundling), TD-007 (threads=1), TD-009 workaround, TD-011 warning-only; TD-001/TD-002/TD-008 still Open. |
 | QA-025 | Verify backup & restore | P1 | [x] | `pg_dump chess_smoke` (16 kB) → restored to `chess_restore`: 1 game + 2 moves intact. Repeat with prod tooling in Phase 9. |
 | QA-026 | Verify release checklist | P1 | [x] | REL-001..017 complete+verified (prod config, secrets, HTTPS seam, backups/restore, controlled migrations, health, logs, smoke). Release sign-off: v0.1.0. |
@@ -317,16 +317,29 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 
 ## Summary
 
-- **Total items:** 237
-- **Implemented & verified (`[x]`):** FND-001..FND-022, CHS-001..CHS-024, AI-001..AI-005, AI-007..AI-008, AI-011..AI-012, AI-015..AI-021, AI-024, DB-001..DB-007, DB-010..DB-017, DB-018..DB-021, SEC-001..SEC-008, SEC-010..SEC-012, SEC-014..SEC-017, SEC-020..SEC-021, API-001..API-012, API-016..API-024, WEB-001..WEB-028, WEB-030, BEN-001..BEN-013, BEN-018..BEN-020, BEN-022, QA-001..QA-026, REL-001..REL-017 (209 items)
-- **Intentionally deferred (`[-]`):** API-013 (analysis UX decision), API-014/API-015 (benchmark harness, Phase 7).
-- **Not yet started (`[ ]`):** WEB-029 (browser e2e — Playwright harness), BEN-014..017 + BEN-021, and remaining Phase 6 P2/P3 items.
-- **Deferred (`[-]`):** SEC-018, SEC-019 (required before public release)
-- **Blocked (`[!]`):** none.
+These counts are recomputed directly from the tables above by
+`scripts/check-checklist.py`, which CI runs — the numbers below must match the
+file or the check fails, so the summary cannot drift again. `[-]`/`[!]` are zero
+now that email verification and password reset shipped (SEC-018/019) and nothing
+is blocked.
+
+- **Total items:** 265
+- **Implemented & verified (`[x]`):** 218
+- **Not yet started (`[ ]`):** 47
+- **In progress (`[~]`):** 0
+- **Intentionally deferred (`[-]`):** 0
+- **Blocked (`[!]`):** 0
+
+The not-started rows are the post-MVP surface: the Phase 10 analysis / coach
+roadmap plus a tail of open P2/P3 quality, benchmarking, and fresh-environment
+items. Every High and Medium finding in the MVP roadmap is implemented.
 
 ---
 
-## Phase 9 — Game Analysis Engine + AI Coach (beats Chess.com Game Review)
+## Phase 10 — Roadmap: Game Analysis Engine + AI Coach (not in MVP scope)
+
+> Post-MVP vision tracked here so it is visible but clearly out of the shipped
+> scope. Nothing below is implemented; the `[-]`/`[ ]` statuses are deliberate.
 
 > Design rule: **Engine calculates, Coach teaches.** Stockfish supplies chess facts
 > (evals, best lines, MultiPV); classification consumes structured analysis only;

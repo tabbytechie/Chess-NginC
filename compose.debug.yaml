@@ -1,0 +1,13 @@
+# Debug/ops override — NEVER part of the default up path.
+#
+# Usage: docker compose -f compose.yaml -f compose.debug.yaml --profile debug up
+#
+# Publishes the database on loopback for manual inspection and enables Adminer.
+# The stock `compose.yaml` exposes neither, so this override exists only to make
+# the debug affordances opt-in (SEC: Adminer is an attack surface and must never
+# start by default).
+services:
+  db:
+    ports:
+      # Loopback-only: reachable from the host, not the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"

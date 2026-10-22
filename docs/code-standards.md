@@ -77,6 +77,34 @@ def submit_move(game: Game, move_uci: str, rules: ChessRules) -> Game:
 
 The API layer validates and calls the service; the service uses the rules adapter; a repository persists the result in a transaction.
 
+## Enforced gates (not aspirational)
+
+These are CI-blocking, not suggestions — a change is not "done" until all pass:
+
+- **Backend:** `ruff check`/`ruff format --check`, `mypy app`, `pytest` with a
+  coverage **floor** (`--cov-fail-under`, ratcheted up from the measured baseline),
+  `pip-audit`, and migration **reversibility** (`upgrade → downgrade -1 → upgrade →
+  check`).
+- **Frontend:** `prettier --check` (a real gate, not just a claimed convention),
+  `eslint`, `tsc --noEmit`, `vitest run`, `npm run build`, and the **OpenAPI drift**
+  check (`npm run check:api`) that regenerates `api-schema.ts` from `openapi.json`.
+- **Contract source of truth:** frontend types are **generated** from the backend
+  OpenAPI schema, never hand-maintained against it. A schema change must re-export
+  `openapi.json` (`python scripts/export-openapi.py`) or CI fails on the diff.
+- **Docs honesty:** `python scripts/check-checklist.py` recomputes the checklist
+  counts so the summary cannot drift from the rows.
+- **E2E:** the CI `e2e` job runs Playwright against the composed stack — the only
+  gate that proves API + web + engine sidecar work together.
+
+## Test safety & portability
+
+- Tests must never touch the developer database; they run on a throwaway DB and
+  drop/recreate tables between cases (`conftest.py` guards this at collection).
+- **Paths with spaces:** the repo directory name contains a space. Fixtures and
+  scripts must not interpolate an interpreter path into a one-line shebang or an
+  unquoted shell command (it splits at the space); pass `sys.executable` as a
+  separate argument and quote paths, so a fresh clone stays green.
+
 ## Definition of clean code
 
 A feature is clean when it: follows naming/formatting; has explicit types and validated inputs; keeps business logic separate from UI/API/persistence; handles expected errors without hiding them; includes tests for normal and edge cases; passes quality gates; avoids unnecessary dependencies and duplication; and documents any deliberate shortcut with a repayment trigger.

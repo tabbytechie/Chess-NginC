@@ -87,36 +87,57 @@ export function isLightSquare(square: Square): boolean {
   return (file + rank) % 2 === 0;
 }
 
-/** Standard starting position piece counts per color. */
-const START_COUNTS: Record<Piece['kind'], number> = { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 };
+/** Standard starting position piece placements, used to replay a move list. */
+const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 /**
- * Captured pieces per side, derived by diffing the starting material against
- * the current position (WEB-018). Display-only; the server owns game state.
+ * Captured pieces per side, derived by replaying the authoritative UCI move list
+ * (WEB-018). Unlike a material diff against the start, this stays correct under
+ * promotion (a pawn becoming a queen is not a capture) and en-passant. A capture
+ * is any move whose destination was occupied, plus the diagonal-into-empty
+ * en-passant case. Display-only; the server owns game state.
  */
-export function capturedPieces(fen: string): {
+export function capturedPiecesFromMoves(moves: { uci: string }[]): {
   capturedByWhite: string[];
   capturedByBlack: string[];
 } {
-  const board = parseFenPlacement(fen);
-  const present: Record<Piece['color'], Record<Piece['kind'], number>> = {
-    w: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 },
-    b: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 },
-  };
-  for (const piece of board.values()) present[piece.color][piece.kind] += 1;
+  const board = parseFenPlacement(STARTING_FEN);
+  const capturedByWhite: string[] = [];
+  const capturedByBlack: string[] = [];
 
-  const missing = (color: Piece['color']): Piece['kind'][] => {
-    const out: Piece['kind'][] = [];
-    for (const kind of ['q', 'r', 'b', 'n', 'p'] as const) {
-      const lost = START_COUNTS[kind] - present[color][kind];
-      for (let i = 0; i < lost; i += 1) out.push(kind);
+  for (const { uci } of moves) {
+    if (uci.length < 4) continue;
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const promotion = uci.length >= 5 ? uci[4] : undefined;
+    const mover = board.get(from);
+    if (!mover) continue;
+
+    // En-passant: a pawn's diagonal move into an empty square captures the pawn
+    // that is left behind on the mover's original rank.
+    const target = board.get(to);
+    if (!target && mover.kind === 'p' && from[0] !== to[0]) {
+      const captured: Piece = { kind: 'p', color: mover.color === 'w' ? 'b' : 'w' };
+      (mover.color === 'w' ? capturedByWhite : capturedByBlack).push(glyph(captured));
+    } else if (target) {
+      (mover.color === 'w' ? capturedByWhite : capturedByBlack).push(glyph(target));
     }
-    return out;
-  };
 
-  return {
-    // Black pieces that vanished were captured by White, and vice versa.
-    capturedByWhite: missing('b').map((kind) => glyph({ kind, color: 'b' })),
-    capturedByBlack: missing('w').map((kind) => glyph({ kind, color: 'w' })),
-  };
+    board.delete(from);
+    board.set(to, promotion ? { kind: promotion as Piece['kind'], color: mover.color } : mover);
+
+    // Castling: the rook hops with the king but captures nothing.
+    if (mover.kind === 'k' && Math.abs(from.charCodeAt(0) - to.charCodeAt(0)) === 2) {
+      const kingFile = to.charCodeAt(0);
+      const rookFrom = kingFile > from.charCodeAt(0) ? 'h' : 'a';
+      const rookTo = String.fromCharCode(kingFile + (kingFile > from.charCodeAt(0) ? -1 : 1));
+      const rook = board.get(`${rookFrom}${mover.color === 'w' ? '1' : '8'}`);
+      if (rook) {
+        board.delete(`${rookFrom}${mover.color === 'w' ? '1' : '8'}`);
+        board.set(`${rookTo}${mover.color === 'w' ? '1' : '8'}`, rook);
+      }
+    }
+  }
+
+  return { capturedByWhite, capturedByBlack };
 }

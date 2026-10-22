@@ -16,7 +16,9 @@ export function XPBar({ level, xp, maxXp, className }: XPBarProps) {
       </div>
       <div className="xp-header">
         <span>XP</span>
-        <span>{xp} / {maxXp}</span>
+        <span>
+          {xp} / {maxXp}
+        </span>
       </div>
       <div className="xp-bar">
         <div className="xp-progress" style={{ width: `${progress}%` }} />

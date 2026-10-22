@@ -1,30 +1,20 @@
-"""Shared test fixtures: live-Postgres DB session and authed API clients."""
+"""Shared test fixtures: live-Postgres DB session and authed API clients.
 
-import os
+The database URL, the safety guard, and the engine all live in :mod:`tests.db`
+so no fixture can accidentally bind to the app's production/dev engine.
+"""
 
 import pytest
 import sqlalchemy
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401  (register tables on Base.metadata)
 from app.api.v1.deps import get_db_session, reset_rate_limits
 from app.core.database import Base
 from app.main import app
 from app.models.session import Session as SessionModel
-
-# Env wins (CI injects `database_url` with credentials), dev URL fallback —
-# same convention as alembic/env.py; the hardcoded default has no password
-# and cannot authenticate against CI's password-scram Postgres service.
-TEST_DB_URL = (
-    os.environ.get("database_url")  # noqa: SIM112 — compose/CI inject lowercase (REL-001)
-    or os.environ.get("DATABASE_URL")
-    or "postgresql+psycopg://tabbymichael@localhost:5432/chess"
-)
-
-engine = create_engine(TEST_DB_URL)
-TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+from tests.db import TestingSession, engine, new_session
 
 
 @pytest.fixture()
@@ -38,6 +28,21 @@ def db() -> Session:
         session.rollback()
         session.close()
         Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture()
+def raw_session() -> Session:
+    """An independent session on the test DB, outside the per-test `db` one.
+
+    Concurrency tests need separate transactions that really are separate, which
+    a single shared session cannot provide.
+    """
+    session = new_session()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
 
 
 @pytest.fixture()

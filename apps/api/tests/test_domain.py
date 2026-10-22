@@ -3,7 +3,15 @@
 import chess
 import pytest
 
-from app.games.domain import STARTING_FEN, Color, Game, GameMode, GameStatus, Move
+from app.games.domain import (
+    STARTING_FEN,
+    Color,
+    Game,
+    GameMode,
+    GameResult,
+    GameStatus,
+    Move,
+)
 
 
 def test_starting_fen_constant_matches_python_chess() -> None:
@@ -47,20 +55,24 @@ def test_resign_non_active_game_raises() -> None:
 
 def test_to_pgn_empty_game() -> None:
     game = Game()
-    assert game.to_pgn() == ""
+    pgn = game.to_pgn()
+    assert '[Result] "*"' in pgn
+    assert pgn.rstrip().endswith("*")  # no moves, just the open result token
 
 
 def test_to_pgn_single_move() -> None:
     game = Game()
     game.moves.append(Move(uci="e2e4", san="e4"))
-    assert game.to_pgn() == "1. e4"
+    pgn = game.to_pgn()
+    assert "1. e4 *" in pgn
+    assert '[White] "Player"' in pgn  # default player_color is white
 
 
 def test_to_pgn_two_moves() -> None:
     game = Game()
     game.moves.append(Move(uci="e2e4", san="e4"))
     game.moves.append(Move(uci="e7e5", san="e5"))
-    assert game.to_pgn() == "1. e4 e5"
+    assert "1. e4 e5 *" in game.to_pgn()
 
 
 def test_to_pgn_multiple_moves() -> None:
@@ -73,4 +85,13 @@ def test_to_pgn_multiple_moves() -> None:
             Move(uci="b8c6", san="Nc6"),
         ]
     )
-    assert game.to_pgn() == "1. e4 e5 2. Nf3 Nc6"
+    assert "1. e4 e5 2. Nf3 Nc6 *" in game.to_pgn()
+
+
+def test_to_pgn_player_black_swaps_names_and_records_result() -> None:
+    game = Game(player_color=Color.BLACK, result=GameResult.BLACK_WIN)
+    game.moves.extend([Move(uci="e2e4", san="e4"), Move(uci="e7e5", san="e5")])
+    pgn = game.to_pgn()
+    assert '[White] "Engine"' in pgn
+    assert '[Black] "Player"' in pgn
+    assert pgn.rstrip().endswith("0-1")

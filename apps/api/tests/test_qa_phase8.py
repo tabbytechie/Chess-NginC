@@ -19,7 +19,12 @@ def _create(client: TestClient, mode: str = "local") -> dict:
 
 
 def test_concurrent_stale_write_one_wins(authed_client: tuple[TestClient, dict]) -> None:
-    """QA-014: sequential stale-version race → exactly one write wins (409 other)."""
+    """QA-014: two writes from the same client snapshot → one 200, one 409.
+
+    Deterministic and sequential on purpose. Genuine two-session contention is
+    covered in `test_unit_of_work.py`; the shared `db` fixture behind `client`
+    cannot express it.
+    """
     client, _ = authed_client
     gid = _create(client)["id"]
     # Simulate the race deterministically: two writes based on the same snapshot.
@@ -37,7 +42,8 @@ def test_repeated_create_is_stable(authed_client: tuple[TestClient, dict]) -> No
     ids = [_create(client)["id"] for _ in range(5)]
     assert len(set(ids)) == 5
     listed = client.get("/api/v1/games").json()
-    assert len(listed) == 5
+    assert listed["total"] == 5
+    assert len(listed["items"]) == 5
 
 
 def test_restart_recovery_via_api(authed_client: tuple[TestClient, dict]) -> None:
@@ -86,7 +92,12 @@ def test_engine_cancel_flag_set() -> None:
 
 
 def test_db_rollback_leaves_clean_state(db) -> None:  # type: ignore[no-untyped-def]
-    """QA-017: failed write rolls back; committed games untouched."""
+    """QA-017: a failed write in the same unit of work rolls back everything.
+
+    The repository now flushes without committing, so an IntegrityError raised
+    by the flush inside `create` unwinds the whole transaction — including the
+    user/game written before it.
+    """
     from app.models.user import User
     from app.repositories.game_repository import GameRepository
 
@@ -98,9 +109,7 @@ def test_db_rollback_leaves_clean_state(db) -> None:  # type: ignore[no-untyped-
     db.add(GameRow(user_id=user.id, mode="x" * 5000, status="active", fen="bad"))
     db.rollback()
     fetched = repo.get_by_id(game.id, user.id)
-    assert fetched is not None
-    assert fetched.fen == STARTING_FEN
-    assert fetched.version == 1
+    assert fetched is None
 
 
 def test_stale_version_conflict_shape(authed_client: tuple[TestClient, dict]) -> None:

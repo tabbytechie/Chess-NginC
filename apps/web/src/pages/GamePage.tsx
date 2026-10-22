@@ -1,11 +1,13 @@
 /**
  * Game page (WEB-010..019, WEB-024/025): board, move submission, undo,
- * resign, draw-claim, engine moves, resume via GET game.
- * Gen Alpha makeover: animated board, capture effects, checkmate celebrations,
- * sound-ready, haptics-ready, vibrant game UI.
+ * resign, draw-claim, resume via GET game.
+ * Phase 3: in `computer` mode the engine replies inside the same move response,
+ * so there is no manual "Engine move" button — the client just renders both
+ * plies with a "thinking" state. Board orientation follows `player_color`; the
+ * terminal banner shows the real result; captures derive from the move list.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useLocation, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 
 import Chessboard from '../components/Chessboard';
@@ -13,14 +15,12 @@ import GameStatusBanner from '../components/GameStatus';
 import MoveHistory from '../components/MoveHistory';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
-import { ApiError, api } from '../lib/api-client';
-import { capturedPieces } from '../lib/chess';
+import { ApiError, api, pgnDownloadUrl } from '../lib/api-client';
+import { capturedPiecesFromMoves } from '../lib/chess';
 import type { GameResponse } from '../lib/api-types';
 
 export default function GamePage() {
   const { id } = useParams<{ id: string }>();
-  const location = useLocation();
-  const initialDepth = (location.state as { depth?: number } | null)?.depth ?? 3;
 
   const [game, setGame] = useState<GameResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,9 +84,10 @@ export default function GamePage() {
     [run, gameId],
   );
 
-  // Hooks must run unconditionally, so derive captures from `game?.fen`.
+  // Hooks must run unconditionally, so derive captures from `game?.moves`.
   const captures = useMemo(
-    () => (game ? capturedPieces(game.fen) : { capturedByWhite: [], capturedByBlack: [] }),
+    () =>
+      game ? capturedPiecesFromMoves(game.moves) : { capturedByWhite: [], capturedByBlack: [] },
     [game],
   );
 
@@ -112,8 +113,12 @@ export default function GamePage() {
     );
   if (!game) return null;
 
-  const inCheck = game.fen.includes('+') || game.status === 'checkmate';
+  const inCheck = game.in_check;
   const finished = game.status !== 'active';
+  const isComputer = game.mode === 'computer';
+  // The engine's turn is whichever side is not the human's, only while playing.
+  const awaitingEngine = isComputer && busy && !finished;
+  const flipped = game.player_color === 'black';
 
   return (
     <motion.main
@@ -125,7 +130,18 @@ export default function GamePage() {
         ← All games
       </Link>
       <h1 className="mb-sm">Game #{game.id}</h1>
-      <GameStatusBanner status={game.status} inCheck={inCheck} />
+      <GameStatusBanner
+        status={game.status}
+        inCheck={inCheck}
+        result={game.result}
+        winner={game.winner}
+        playerColor={game.player_color}
+      />
+      {awaitingEngine && (
+        <p role="status" aria-live="polite" className="thinking mb-md text-ink-soft">
+          🤖 Engine is thinking…
+        </p>
+      )}
       {error && (
         <p role="alert" className="error mb-md">
           {error}
@@ -140,6 +156,7 @@ export default function GamePage() {
             onSelect={setSelected}
             onMove={handleMove}
             disabled={busy}
+            flipped={flipped}
             lastMove={
               game.moves.length > 0
                 ? {
@@ -232,27 +249,17 @@ export default function GamePage() {
             >
               Claim draw
             </Button>
-            {game.mode === 'computer' && (
-              <Button
-                variant="primary"
-                onClick={() =>
-                  void run((g) =>
-                    api.engineMove(gameId, {
-                      expected_version: g.version,
-                      max_depth: initialDepth,
-                      max_time_ms: 2000,
-                    }),
-                  )
-                }
-                disabled={busy || finished}
-                className="w-full mt-sm"
-              >
-                Engine move (depth {initialDepth})
-              </Button>
-            )}
+            <a
+              className="pgn-link mt-sm block text-neon-blue hover:text-neon-pink"
+              href={pgnDownloadUrl(gameId)}
+            >
+              ⬇ Download PGN
+            </a>
           </div>
           <p className="hint mt-lg text-center text-xs text-ink-soft">
-            Click a piece, then its destination. Promotions ask which piece.
+            {isComputer
+              ? 'Play your move; the engine replies in the same step.'
+              : 'Click a piece, then its destination. Promotions ask which piece.'}
           </p>
         </aside>
       </div>

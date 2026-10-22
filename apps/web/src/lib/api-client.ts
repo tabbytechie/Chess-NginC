@@ -4,13 +4,19 @@
  */
 import type {
   CreateGameRequest,
+  EmailRequest,
   EngineMoveRequest,
   ErrorResponse,
+  GameListResponse,
   GameResponse,
   LoginRequest,
   MoveRequest,
+  RecoveryMessage,
   RegisterRequest,
+  ResetPasswordRequest,
+  StatsResponse,
   UserResponse,
+  VerifyEmailRequest,
   VersionRequest,
 } from './api-types';
 
@@ -62,7 +68,15 @@ export const api = {
   me: () => get<UserResponse>('/auth/me'),
 
   createGame: (p: CreateGameRequest) => post<GameResponse>('/games', p),
-  listGames: () => get<GameResponse[]>('/games'),
+  listGames: (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set('status', params.status);
+    if (params.limit != null) query.set('limit', String(params.limit));
+    if (params.offset != null) query.set('offset', String(params.offset));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return get<GameListResponse>(`/games${suffix}`);
+  },
+  stats: () => get<StatsResponse>('/stats'),
   getGame: (id: number) => get<GameResponse>(`/games/${id}`),
   submitMove: (id: number, p: MoveRequest) => post<GameResponse>(`/games/${id}/moves`, p),
   undoMove: (id: number, p: VersionRequest) => post<GameResponse>(`/games/${id}/undo`, p),
@@ -70,4 +84,17 @@ export const api = {
   claimDraw: (id: number) => post<GameResponse>(`/games/${id}/draw-claim`),
   engineMove: (id: number, p: EngineMoveRequest) =>
     post<GameResponse>(`/games/${id}/engine-move`, p),
+
+  // Account recovery (SEC-013). Each returns the same uniform reply shape so
+  // the caller can never learn whether an email is registered.
+  verifyEmail: (p: VerifyEmailRequest) => post<RecoveryMessage>('/auth/verify-email', p),
+  resendVerification: (p: EmailRequest) => post<RecoveryMessage>('/auth/resend-verification', p),
+  requestPasswordReset: (p: EmailRequest) =>
+    post<RecoveryMessage>('/auth/request-password-reset', p),
+  resetPassword: (p: ResetPasswordRequest) => post<RecoveryMessage>('/auth/reset-password', p),
 };
+
+/** Absolute URL for the PGN download; the browser saves it as an attachment. */
+export function pgnDownloadUrl(id: number): string {
+  return `${API_BASE}/api/v1/games/${id}/pgn`;
+}

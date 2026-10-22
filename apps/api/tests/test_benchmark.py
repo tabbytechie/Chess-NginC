@@ -12,9 +12,15 @@ from app.engine.benchmark import (
     compare_position,
     hardware_fingerprint,
     mean_score_gap,
+    record_run,
+    run_suite,
     stockfish_version_label,
 )
-from app.engine.benchmark_suite import BENCHMARK_POSITIONS, BENCHMARK_SUITE_VERSION, get_suite
+from app.engine.benchmark_suite import (
+    BENCHMARK_POSITIONS,
+    BENCHMARK_SUITE_VERSION,
+    get_suite,
+)
 from app.engine.domain import EngineConfig, EngineResult
 from app.engine.stockfish import StockfishConfig
 
@@ -114,3 +120,36 @@ def test_repeatability_custom_engine_deterministic() -> None:
 def test_hardware_and_version_labels_recorded() -> None:
     assert hardware_fingerprint()
     assert "stockfish" in stockfish_version_label()
+
+
+def test_run_suite_covers_every_position(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The suite runner produces one comparison per versioned position."""
+    monkeypatch.setenv("PATH", "/nonexistent")  # no reference binary required
+    result = run_suite(EngineConfig(max_depth=1, max_time_ms=500), StockfishConfig(path=""))
+    assert result.suite_version == BENCHMARK_SUITE_VERSION
+    assert len(result.comparisons) == len(BENCHMARK_POSITIONS)
+
+
+def test_record_run_persists_provenance(db) -> None:  # type: ignore[no-untyped-def]
+    """BEN-019: a run and its per-position rows land with real provenance."""
+    from app.models.benchmark_result import BenchmarkResult
+    from app.models.benchmark_run import BenchmarkRun
+
+    custom_config = EngineConfig(max_depth=1, max_time_ms=500)
+    reference_config = StockfishConfig(max_depth=10, max_time_ms=500, path="")
+    run = record_run(
+        db,
+        run_suite(custom_config, reference_config),
+        custom_config=custom_config,
+        reference_config=reference_config,
+        provider_name="custom",
+    )
+    db.refresh(run)
+    assert isinstance(run.id, int)
+    # Provenance: backend identity + version share one field, bounds and host land.
+    assert "custom" in run.stockfish_version
+    assert run.suite_version == BENCHMARK_SUITE_VERSION
+    assert run.custom_depth == 1
+    assert run.hardware
+    assert db.query(BenchmarkResult).filter_by(run_id=run.id).count() == len(BENCHMARK_POSITIONS)
+    assert db.query(BenchmarkRun).count() == 1

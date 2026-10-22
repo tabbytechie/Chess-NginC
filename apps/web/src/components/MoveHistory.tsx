@@ -20,7 +20,9 @@ export default function MoveHistory({ moves }: { moves: MoveResponse[] }) {
       {rows.map((row, idx) => (
         <motion.li
           key={row.num}
-          className={['move-row', idx === rows.length - 1 ? 'move-last' : ''].filter(Boolean).join(' ')}
+          className={['move-row', idx === rows.length - 1 ? 'move-last' : '']
+            .filter(Boolean)
+            .join(' ')}
           initial={{ opacity: 0, x: -10 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.3 }}

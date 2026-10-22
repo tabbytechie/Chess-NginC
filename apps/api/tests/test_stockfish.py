@@ -31,7 +31,11 @@ from app.games.domain import Color
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-FAKE_UCI = """#!/usr/bin/env -S {python} -u
+# The engine logic itself. Deliberately carries no shebang: the interpreter is
+# named by a launcher written below, because a `#!` line cannot quote an
+# interpreter path containing a space (`.../Chess NginC/...` splits at the
+# space and the child dies with exit 127).
+FAKE_UCI = """
 import sys
 def main():
     multipv = 1
@@ -62,7 +66,9 @@ def main():
             ]
             for i, (move, cp, pv) in enumerate(infos[:max(1, multipv)]):
                 joined = " ".join(pv)
-                line = f"info depth 1 multipv {{i + 1}} score cp {{cp}} pv {{joined}}"
+                # Written verbatim (no .format() on the template), so single
+                # braces are the real f-string fields.
+                line = f"info depth 1 multipv {i + 1} score cp {cp} pv {joined}"
                 print(line)
             print("bestmove e2e4")
         elif line == "quit":
@@ -71,21 +77,34 @@ def main():
 main()
 """
 
+# POSIX launcher. `#!/bin/sh` is space-free, and the interpreter path is quoted
+# by the shell rather than by the kernel's shebang parser.
+FAKE_LAUNCHER = """#!/bin/sh
+exec "{python}" -u "{script}" "$@"
+"""
 
-@pytest.fixture()
-def fake_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+
+def _fake_engine_files(tmp_path: Path) -> tuple[str, Path]:
+    """Write the fake engine body and return (launcher path, body path)."""
     script = tmp_path / "fake-stockfish.py"
-    script.write_text(FAKE_UCI.format(python=sys.executable))
+    script.write_text(FAKE_UCI)
     if os.name == "nt":
         # Windows cannot exec extensionless shebang scripts (WinError 193);
         # wrap in a .cmd so CreateProcess can launch it.
-        wrapper = tmp_path / "fake-stockfish.cmd"
-        wrapper.write_text(f'@"{sys.executable}" -u "{script}" %*\n')
-        monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
-        return str(wrapper)
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    return str(script)
+        launcher = tmp_path / "fake-stockfish.cmd"
+        launcher.write_text(f'@"{sys.executable}" -u "{script}" %*\n')
+    else:
+        launcher = tmp_path / "fake-stockfish"
+        launcher.write_text(FAKE_LAUNCHER.format(python=sys.executable, script=script))
+        launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+    return str(launcher), script
+
+
+@pytest.fixture()
+def fake_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    launcher, _ = _fake_engine_files(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    return launcher
 
 
 def test_provenance_constants_record_official_source() -> None:
@@ -126,7 +145,12 @@ def test_missing_binary_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_analyse_starting_position_with_fake_binary(fake_binary: str) -> None:
-    result = analyse_position(STARTING_FEN, Color.WHITE, StockfishConfig(path=fake_binary))
+    # A generous budget keeps this deterministic: the timeout flag trips at
+    # `elapsed_ms > max_time_ms * 2`, and a cold-starting fake interpreter can
+    # exceed the 500 ms default under full-suite load without being slow.
+    result = analyse_position(
+        STARTING_FEN, Color.WHITE, StockfishConfig(path=fake_binary, max_time_ms=30_000)
+    )
     assert result.best_move in [m.uci() for m in chess.Board(STARTING_FEN).legal_moves]
     assert result.termination == "completed"
     assert result.time_ms >= 0

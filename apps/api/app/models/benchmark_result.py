@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.clock import utc_now
 from app.core.database import Base
 
 
@@ -25,4 +26,6 @@ class BenchmarkResult(Base):
     reference_score: Mapped[int] = mapped_column(Integer, nullable=False)
     reference_depth: Mapped[int] = mapped_column(Integer, nullable=False)
     moves_agree: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

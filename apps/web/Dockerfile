@@ -7,9 +7,11 @@ RUN npm ci
 COPY . ./
 RUN npm run build
 
-# Stage 2: serve over HTTP. TLS terminates at the reverse proxy (REL-003).
-FROM nginx:alpine AS runtime
+# Stage 2: serve over HTTP as an unprivileged user (Phase 5 hardening). The
+# `nginx-unprivileged` image listens on 8080 and runs the worker as non-root;
+# TLS still terminates at the reverse proxy in front of it (REL-003).
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
 COPY --from=build /srv/web/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]
