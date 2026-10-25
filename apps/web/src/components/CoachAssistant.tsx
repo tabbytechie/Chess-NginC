@@ -13,11 +13,25 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Lightbulb, Loader2, PlayCircle, Send, X } from 'lucide-react';
+import { Lightbulb, Loader2, PlayCircle, Send, Volume2, X } from 'lucide-react';
 
 import { Button } from './ui/Button';
 import { ApiError, api } from '../lib/api-client';
-import type { AssistantAnswerResponse, AssistantLineStep, CoachPattern } from '../lib/api-types';
+import type {
+  AssistantAnswerResponse,
+  AssistantLineStep,
+  CoachPattern,
+  VoiceOption,
+} from '../lib/api-types';
+import {
+  listBrowserVoices,
+  setVoiceSelection,
+  speak,
+  stopSpeaking,
+  voiceAvailable,
+  type BrowserVoice,
+  type VoiceSelection,
+} from '../lib/voice';
 
 type Props = {
   gameId: number;
@@ -63,6 +77,14 @@ const INTENT_LABEL: Record<string, string> = {
   general: 'Coach',
 };
 
+/** Map a stored voice id to a narrator selection given the premium-voice ids.
+ *  Empty = browser default (null, i.e. try ElevenLabs then fall back); a known
+ *  ElevenLabs id = premium engine; anything else = a browser OS voice name. */
+function selectionFor(id: string, elevenIds: Set<string>): VoiceSelection | null {
+  if (!id) return null;
+  return elevenIds.has(id) ? { engine: 'eleven', id } : { engine: 'browser', id };
+}
+
 export default function CoachAssistant({
   gameId,
   focusPly,
@@ -76,8 +98,47 @@ export default function CoachAssistant({
   const [patternSummary, setPatternSummary] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [voiceId, setVoiceId] = useState('');
+  const [elevenVoices, setElevenVoices] = useState<VoiceOption[]>([]);
+  const [browserVoices, setBrowserVoices] = useState<BrowserVoice[]>(() => listBrowserVoices());
+  const [voiceReady] = useState(() => voiceAvailable());
+  const [savingVoice, setSavingVoice] = useState(false);
   const nextId = useRef(1);
   const threadRef = useRef<HTMLDivElement | null>(null);
+
+  const elevenIds = useCallback(() => new Set(elevenVoices.map((v) => v.id)), [elevenVoices]);
+
+  // Load consent + chosen voice (server-side) and the free voice catalog once.
+  // Degrades quietly: an unconfigured/offline backend leaves the defaults and a
+  // silent coach rather than throwing over the review.
+  useEffect(() => {
+    let alive = true;
+    const synth = typeof window !== 'undefined' ? window.speechSynthesis : undefined;
+    const onVoicesChanged = () => {
+      if (alive) setBrowserVoices(listBrowserVoices());
+    };
+    synth?.addEventListener?.('voiceschanged', onVoicesChanged);
+    (async () => {
+      try {
+        const [prefs, catalog] = await Promise.all([api.getVoicePrefs(), api.listVoices()]);
+        if (!alive) return;
+        setVoiceOn(prefs.voice_authorized);
+        setVoiceId(prefs.voice_id);
+        setElevenVoices(catalog.voices);
+        setVoiceSelection(selectionFor(prefs.voice_id, new Set(catalog.voices.map((v) => v.id))));
+      } catch {
+        /* no backend voice config yet: defaults stand */
+      }
+    })();
+    return () => {
+      alive = false;
+      synth?.removeEventListener?.('voiceschanged', onVoicesChanged);
+    };
+  }, []);
+
+  // Closing the panel must not leave the coach talking over the page.
+  useEffect(() => () => stopSpeaking(), []);
 
   const push = useCallback((turn: Omit<Turn, 'id'>) => {
     setTurns((prev) => [...prev, { ...turn, id: nextId.current++ }]);
@@ -108,6 +169,8 @@ export default function CoachAssistant({
         history,
       });
       push({ role: 'coach', text: answer.answer, answer });
+      // Speak the answer only when the user has authorized the coach's voice.
+      if (voiceOn) speak(answer.answer);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'The coach could not answer just now.');
     } finally {
@@ -130,6 +193,34 @@ export default function CoachAssistant({
     }
   }
 
+  // Persist a voice change and reflect the server's answer; on failure keep the
+  // local choice so the UI never fights an offline backend.
+  async function saveVoice(patch: { voice_authorized?: boolean; voice_id?: string }) {
+    setSavingVoice(true);
+    try {
+      const res = await api.saveVoicePrefs(patch);
+      setVoiceOn(res.voice_authorized);
+      setVoiceId(res.voice_id);
+    } catch {
+      /* optimistic: the selection still applies to this session via voice.ts */
+    } finally {
+      setSavingVoice(false);
+    }
+  }
+
+  function toggleConsent() {
+    const next = !voiceOn;
+    if (!next) stopSpeaking();
+    setVoiceOn(next);
+    void saveVoice({ voice_authorized: next });
+  }
+
+  function pickVoice(id: string) {
+    setVoiceId(id);
+    setVoiceSelection(selectionFor(id, elevenIds()));
+    void saveVoice({ voice_id: id });
+  }
+
   return (
     <section className="coach-panel" aria-label="coach assistant">
       <header className="coach-head">
@@ -138,6 +229,52 @@ export default function CoachAssistant({
           <X size={15} aria-hidden="true" />
         </Button>
       </header>
+
+      {voiceReady && (
+        <div className="coach-voice" role="group" aria-label="coach voice settings">
+          <label className="coach-voice-consent">
+            <input
+              type="checkbox"
+              checked={voiceOn}
+              onChange={toggleConsent}
+              disabled={savingVoice}
+            />
+            <Volume2 size={14} aria-hidden="true" />
+            Let the coach speak
+          </label>
+          <label className="sr-only" htmlFor="coach-voice-select">
+            Narration voice
+          </label>
+          <select
+            id="coach-voice-select"
+            className="coach-voice-select"
+            value={voiceId}
+            onChange={(e) => pickVoice(e.target.value)}
+            disabled={savingVoice}
+          >
+            <option value="">Default (premium ElevenLabs when a key is set)</option>
+            {browserVoices.length > 0 && (
+              <optgroup label="Browser voices">
+                {browserVoices.map((v) => (
+                  <option key={`b-${v.id}`} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {elevenVoices.length > 0 && (
+              <optgroup label="Premium (ElevenLabs)">
+                {elevenVoices.map((v) => (
+                  <option key={`e-${v.id}`} value={v.id} disabled={!v.available}>
+                    {v.name}
+                    {v.available ? '' : ' — needs a key'}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+        </div>
+      )}
 
       <div className="coach-thread" ref={threadRef}>
         {turns.length === 0 && !patterns && (

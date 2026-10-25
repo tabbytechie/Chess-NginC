@@ -342,3 +342,25 @@ export interface CoachPatternsResponse {
   summary: string;
   items: CoachPattern[];
 }
+
+/** How a selectable voice is produced: server ElevenLabs proxy or browser OS. */
+export type VoiceEngine = 'eleven' | 'browser';
+
+/** One narration voice offered in the picker. */
+export interface VoiceOption {
+  id: string;
+  name: string;
+  engine: VoiceEngine | string;
+  available: boolean;
+}
+
+/** The curated free-tier ElevenLabs voices the server will proxy to. */
+export interface VoiceListResponse {
+  voices: VoiceOption[];
+}
+
+/** The caller's stored voice consent + selected voice (server-side, per user). */
+export interface VoicePreferences {
+  voice_authorized: boolean;
+  voice_id: string;
+}

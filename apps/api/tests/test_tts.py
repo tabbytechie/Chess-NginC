@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.v1.tts import reset_tts_rate_limits
+from app.api.v1.tts import FREE_ELEVEN_VOICES, reset_tts_rate_limits
 from app.core.database import settings
 
 
@@ -161,3 +161,98 @@ class TestTTSRateLimit:
         assert status_codes[-1] == 429
         # All earlier calls should have succeeded
         assert all(code == 200 for code in status_codes[:-1])
+
+
+class TestVoiceCatalog:
+    """GET /api/v1/tts/voices lists the curated free-tier ElevenLabs voices."""
+
+    def test_lists_curated_voices_unavailable_without_key(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "", raising=False)
+        resp = client.get("/api/v1/tts/voices")
+        assert resp.status_code == 200
+        voices = resp.json()["voices"]
+        assert len(voices) == len(FREE_ELEVEN_VOICES)
+        assert all(v["engine"] == "eleven" for v in voices)
+        # No key configured -> honest greyed-out availability.
+        assert all(v["available"] is False for v in voices)
+
+    def test_voices_available_when_key_configured(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "fake-key", raising=False)
+        voices = client.get("/api/v1/tts/voices").json()["voices"]
+        assert all(v["available"] is True for v in voices)
+
+
+class TestTTSVoiceSelection:
+    """The TTS request may pick an allowlisted voice; anything else is refused."""
+
+    def test_forwards_allowlisted_voice(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "fake-key", raising=False)
+        chosen = FREE_ELEVEN_VOICES[0][0]
+        with patch(
+            "app.api.v1.tts.requests.post",
+            return_value=_fake_response(200, b"audio"),
+        ) as mock_post:
+            resp = client.post("/api/v1/tts", json={"text": "Knight to f3.", "voice": chosen})
+        assert resp.status_code == 200
+        assert chosen in mock_post.call_args[0][0]
+
+    def test_rejects_voice_outside_allowlist(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "fake-key", raising=False)
+        with patch("app.api.v1.tts.requests.post") as mock_post:
+            resp = client.post("/api/v1/tts", json={"text": "Knight to f3.", "voice": "../../evil"})
+        assert resp.status_code == 422
+        mock_post.assert_not_called()
+
+
+class TestVoicePreferences:
+    """/me/voice stores consent + chosen voice per user (server-side)."""
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        assert client.get("/api/v1/me/voice").status_code == 401
+
+    def test_defaults_are_unauthorized_browser(
+        self, authed_client: tuple[TestClient, dict]
+    ) -> None:
+        client, _ = authed_client
+        body = client.get("/api/v1/me/voice").json()
+        assert body == {"voice_authorized": False, "voice_id": ""}
+
+    def test_roundtrips_consent_and_voice(self, authed_client: tuple[TestClient, dict]) -> None:
+        client, _ = authed_client
+        chosen = FREE_ELEVEN_VOICES[1][0]
+        put = client.put("/api/v1/me/voice", json={"voice_authorized": True, "voice_id": chosen})
+        assert put.status_code == 200
+        assert put.json() == {"voice_authorized": True, "voice_id": chosen}
+        # Follows the account: a fresh read returns the persisted choice.
+        assert client.get("/api/v1/me/voice").json() == {
+            "voice_authorized": True,
+            "voice_id": chosen,
+        }
+
+    def test_empty_voice_selects_browser(self, authed_client: tuple[TestClient, dict]) -> None:
+        client, _ = authed_client
+        client.put("/api/v1/me/voice", json={"voice_authorized": True, "voice_id": "x"})
+        resp = client.put("/api/v1/me/voice", json={"voice_id": ""})
+        assert resp.json()["voice_id"] == ""
+
+    def test_persists_browser_voice_name(self, authed_client: tuple[TestClient, dict]) -> None:
+        # A browser OS voice name is a harmless preference string: it is stored
+        # (so the choice follows the account) but never sent to the provider
+        # (POST /tts enforces the allowlist separately).
+        client, _ = authed_client
+        resp = client.put("/api/v1/me/voice", json={"voice_id": "Google UK English Male"})
+        assert resp.status_code == 200
+        assert resp.json()["voice_id"] == "Google UK English Male"
+
+    def test_rejects_oversized_voice_id(self, authed_client: tuple[TestClient, dict]) -> None:
+        client, _ = authed_client
+        resp = client.put("/api/v1/me/voice", json={"voice_id": "x" * 65})
+        assert resp.status_code == 422

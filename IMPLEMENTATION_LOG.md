@@ -1302,6 +1302,90 @@ capture tables (FP-001..003) per `docs/market-plan.md`; RL-005 Redis swap only w
 TD-012 trips; TD-021 (proxy/XFF trust) must land before real-IP limiting behind a
 reverse proxy.
 
+## Session 2026-10-25 (c) — ElevenLabs TTS: "works on Linux, silent on Mac" diagnosis
+
+**Task.** The user reported the ElevenLabs voice (PR #13, merged to main) narrating on
+their Linux box but not on this Mac, and asked to check the implementation. Reproduced
+end-to-end against the live `chessnginc-api-1` container.
+
+**Root cause (not a code bug).** The feature is fully wired and correct: `.env` key →
+compose forwards `elevenlabs_api_key/voice_id/model_id` → running container sees them →
+`app/api/v1/tts.py` proxies `POST /api/v1/tts` → ElevenLabs. Direct provider call
+returns **401 `authentication_error / missing_permissions`: "The API key you used is
+missing the permission text_to_speech"**. The key authenticates but its scope lacks the
+TTS permission. The proxy maps 401→502, and `voice.ts::fetchTTSAudio` treats non-503
+non-ok as `'error'` → silent browser-speechSynthesis fallback — hence a robotic voice
+here vs the premium voice on Linux (that box's `.env` holds a differently-scoped key;
+`.env` is gitignored, so the two machines legitimately differ).
+
+**Fix for the user (outside the repo).** In the ElevenLabs dashboard, edit the API key
+`sk_430be9…` and tick the **text_to_speech** permission (or mint a key that has it),
+put it in the root `.env`, then `docker compose up -d api` to recreate with the new
+value. No code change is needed for the voice to work.
+
+**Code change made (diagnosability only).** `app/api/v1/tts.py` 401 branch: the old
+message "rejected credentials" was misleading (the key is valid, the scope is not).
+It now logs the provider's detail server-side (never echoes the key) and returns an
+accurate hint to verify the key is granted `text_to_speech`, so a future
+per-machine key difference is self-evident instead of looking like a broken build.
+
+**Tests executed.** `pytest tests/test_tts.py` → **10 passed** (401→502 mapping asserts
+status only, unaffected). `ruff format`/`ruff check`/`mypy` clean on the changed file.
+
+## Session 2026-10-25 (d) — Multi-voice narration + AI-coach voice (opt-in consent)
+
+**Task.** "Implement several free voices" and let the user authorize the voice in the
+AI coach. Prior state: one hardcoded ElevenLabs voice, narration only on the review
+tour, no way to pick a voice, no coach speech, no per-user persistence.
+
+**Design (confirmed with the user).** Two voice families in one picker (browser OS
+voices + a curated free-tier ElevenLabs catalog), an explicit opt-in that authorizes
+the coach to speak its answers, and server-side per-user persistence so the choice
+follows the account.
+
+**Backend.**
+- `app/models/user.py`: `voice_authorized` (Bool, default False) + `voice_id` (Str(64),
+  default "") on `users`; migration `b4e2d7c0a915` (revises `f6b1c8d2a9e4`) adds both
+  with a server default to backfill existing rows, then drops the default so the schema
+  matches the ORM's Python-side default (`alembic check` clean).
+- `app/api/v1/tts.py`: `FREE_ELEVEN_VOICES` allowlist (Rachel/Adam/George/Daniel) is the
+  single source of truth — the only ids ever accepted from a client or interpolated into
+  the provider URL. `GET /tts/voices` lists them with an `available` flag (false with no
+  key). `POST /tts` gains an optional `voice` field, validated against the allowlist
+  (`400` otherwise). Authenticated `GET/PUT /me/voice` read/write the consent + selection;
+  an ElevenLabs id is allowlist-checked on write, a browser voice name is stored as a
+  harmless preference string (the `/tts` path independently guards the real call).
+- `schemas.py`: `VoiceOption`/`VoiceListResponse`/`VoicePreferencesResponse`/`VoicePreferencesUpdate`.
+
+**Frontend.**
+- `api-client.ts`: a `put` helper + `listVoices`/`getVoicePrefs`/`saveVoicePrefs`; `api-types.ts` voice types.
+- `voice.ts`: a session-wide `VoiceSelection` (`{engine, id}`); `setVoiceSelection`/
+  `getVoiceSelection`/`listBrowserVoices`. `speak()` with a browser selection never
+  touches the proxy; an ElevenLabs selection forwards its id and re-arms the probe; a
+  null selection keeps the original default-then-fallback behaviour.
+- `CoachAssistant.tsx`: a voice bar (consent checkbox + a `<select>` grouping browser
+  then premium voices, unavailable ones disabled); hydrates prefs + catalog on mount and
+  degrades quietly offline; speaks an answer **only when `voice_authorized`**, persists
+  consent/pick changes.
+
+**Tests.** Backend `pytest tests/test_tts.py` → **20 passed** (catalog, allowlist reject,
+`/me/voice` roundtrip incl. PUT, TTS `voice` param). Frontend: `CoachAssistant.test.tsx`
+voice suite (5 cases: silent-unless-authorized, speaks-when-authorized, consent persists,
+catalog pick forwards to selection+storage, unavailable voice disabled) → **13 passed**
+in the file; `voice.test.ts` unaffected.
+
+**Gates (CI order, all green).** ruff check/format, mypy (89 files), alembic
+upgrade-head + check on a clean throwaway DB, `pytest` **480 passed**; frontend eslint,
+`tsc --noEmit`, `vitest` **252 passed**, `vite build`, prettier.
+
+**Docs.** `docs/api.md` new *Voice & narration* section (endpoints, allowlist trust
+boundary, 503/fallback semantics, opt-in default).
+
+**Remaining / next task.** Nothing blocking; the premium catalog voices only actually
+play once an ElevenLabs key carrying the `text_to_speech` scope is set (see session (c))
+— until then every pick falls back to the browser voice.
+
+
 
 
 

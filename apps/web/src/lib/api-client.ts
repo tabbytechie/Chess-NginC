@@ -29,6 +29,8 @@ import type {
   TrainingSummaryResponse,
   UserResponse,
   VersionRequest,
+  VoiceListResponse,
+  VoicePreferences,
 } from './api-types';
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -71,6 +73,9 @@ const post = <T>(path: string, payload?: unknown): Promise<T> =>
   request<T>(path, { method: 'POST', body: JSON.stringify(payload ?? {}) });
 
 const get = <T>(path: string): Promise<T> => request<T>(path);
+
+const put = <T>(path: string, payload?: unknown): Promise<T> =>
+  request<T>(path, { method: 'PUT', body: JSON.stringify(payload ?? {}) });
 
 const del = <T>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' });
 
@@ -133,4 +138,10 @@ export const api = {
   trainingMine: () => get<MinePuzzleResponse[]>('/training/mine'),
   submitTrainingAttempt: (p: TrainingAttemptRequest) =>
     post<TrainingAttemptResponse>('/training/attempts', p),
+
+  // Voice (REVIEW-009 + Phase 12 AI-coach narration): the free premium-voice
+  // catalog and the caller's server-side consent + selected voice.
+  listVoices: () => get<VoiceListResponse>('/tts/voices'),
+  getVoicePrefs: () => get<VoicePreferences>('/me/voice'),
+  saveVoicePrefs: (p: Partial<VoicePreferences>) => put<VoicePreferences>('/me/voice', p),
 };

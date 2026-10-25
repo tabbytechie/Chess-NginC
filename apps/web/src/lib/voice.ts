@@ -20,6 +20,17 @@ import { API_BASE } from './api-client';
 
 const TTS_URL = `${API_BASE}/api/v1/tts`;
 
+/**
+ * The voice the narrator should use. `eleven` forwards the id to the server
+ * proxy (allowlisted there); `browser` matches a `speechSynthesis` voice by name.
+ * `null` keeps the original behaviour: try ElevenLabs default, fall back to the
+ * best browser voice.
+ */
+export type VoiceSelection = { engine: 'eleven' | 'browser'; id: string };
+
+// Names/URIs of the OS voices this browser can speak with, for the picker.
+export type BrowserVoice = { id: string; name: string };
+
 // A calm, authoritative read: slightly slower than the default and a touch
 // below the default pitch. Composed narration sounds rushed at rate 1.
 const VOICE_RATE = 0.92;
@@ -52,6 +63,10 @@ const VOICE_HINTS = [
 // go straight to the speechSynthesis fallback for the rest of the session.
 let ttsAvailable: boolean | null = null;
 
+// The narrator's chosen voice (null = defaults). Module-level singleton so the
+// coach panel and the review tour share one narrator configuration.
+let selection: VoiceSelection | null = null;
+
 // The currently playing HTMLAudioElement (null when idle).
 let activeAudio: HTMLAudioElement | null = null;
 
@@ -74,8 +89,45 @@ export function voiceAvailable(): boolean {
   return typeof fetch !== 'undefined' || engine() !== null;
 }
 
-function pickVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+/**
+ * The OS voices this browser offers, for the picker. Names are the stable
+ * handle we persist (voice URIs vary across platforms); de-duplicated because
+ * some browsers list the same voice once per locale.
+ */
+export function listBrowserVoices(): BrowserVoice[] {
+  const synth = engine();
+  if (!synth) return [];
+  const seen = new Set<string>();
+  const out: BrowserVoice[] = [];
+  for (const voice of synth.getVoices()) {
+    if (seen.has(voice.name)) continue;
+    seen.add(voice.name);
+    out.push({ id: voice.name, name: voice.name });
+  }
+  return out;
+}
+
+/** Choose the narrator's voice for the whole session (null restores defaults). */
+export function setVoiceSelection(next: VoiceSelection | null): void {
+  selection = next;
+  // A fresh selection re-arms the ElevenLabs probe: a previous 503 should not
+  // keep short-circuiting a voice the user has only now chosen.
+  if (next?.engine === 'eleven') ttsAvailable = null;
+}
+
+export function getVoiceSelection(): VoiceSelection | null {
+  return selection;
+}
+
+function pickVoice(
+  voices: SpeechSynthesisVoice[],
+  preferred?: string,
+): SpeechSynthesisVoice | null {
   if (voices.length === 0) return null;
+  if (preferred) {
+    const exact = voices.find((voice) => voice.name === preferred);
+    if (exact) return exact;
+  }
   for (const hint of VOICE_HINTS) {
     const match = voices.find((voice) => voice.name.toLowerCase().includes(hint.toLowerCase()));
     if (match) return match;
@@ -121,7 +173,8 @@ function speakWithBrowser(text: string): void {
   if (!synth) return;
   try {
     synth.cancel();
-    const voice = pickVoice(synth.getVoices());
+    const preferred = selection?.engine === 'browser' ? selection.id : undefined;
+    const voice = pickVoice(synth.getVoices(), preferred);
     for (const chunk of chunkText(text)) {
       const utterance = new SpeechSynthesisUtterance(chunk);
       utterance.rate = VOICE_RATE;
@@ -167,12 +220,13 @@ async function fetchTTSAudio(
   signal: AbortSignal,
 ): Promise<ArrayBuffer | 'unavailable' | 'error'> {
   if (ttsAvailable === false) return 'unavailable';
+  const elevenVoice = selection?.engine === 'eleven' ? selection.id : '';
   try {
     const resp = await fetch(TTS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, voice: elevenVoice }),
       signal,
     });
     if (resp.status === 503) {
@@ -235,6 +289,12 @@ export function speak(text: string): void {
 
   // Cancel whatever is currently playing or being fetched.
   cancelActivePlayback();
+
+  // A chosen browser voice never touches the proxy — speak with it directly.
+  if (selection?.engine === 'browser') {
+    speakWithBrowser(trimmed);
+    return;
+  }
 
   // Fast path: TTS is known-unavailable → use browser engine immediately.
   if (ttsAvailable === false) {

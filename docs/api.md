@@ -200,6 +200,25 @@ from a live engine PV or (offline) the recorded plies.
 `CoachPatternsResponse`: `summary` + `items[]`
 (`{opening_family, mistakes, blunders, total_errors, avg_loss_cp}`).
 
+## Voice & narration (REVIEW-009 + AI-coach voice)
+
+The API key never reaches the browser: the client calls the backend proxy, which
+calls ElevenLabs and streams back audio. When no key is configured (the dev/CI
+default) or the key lacks the `text_to_speech` scope, every synthesise returns an
+error and the client silently falls back to the browser's `speechSynthesis` — the
+feature degrades to the free OS voice, never a hard failure.
+
+| Method & Path | Description |
+|---------------|-------------|
+| `GET /tts/voices` | The curated **free-tier** ElevenLabs voice catalog `voices[]` (`{id, name, engine, available}`); `available` is false when no key is set, so the picker disables them. The `id` is the only value ever accepted back |
+| `POST /tts` | Body `{text, voice?}` → `audio/mpeg`. `text` ≤ 500 chars; `voice` must be an id from the catalog (else `400`) — arbitrary strings can never reach the provider URL. `503` = key not configured (browser-fallback signal); in-process 20 req/min per user |
+| `GET /me/voice` 🔒 | The caller's stored prefs `{voice_authorized, voice_id}` — consent for the coach to speak answers aloud, and the chosen voice (an ElevenLabs id or a browser voice name; empty = default) |
+| `PUT /me/voice` 🔒 | Body is a partial prefs patch; persists consent and/or selection server-side (follows the account across devices) and returns the stored result. An ElevenLabs `voice_id` is validated against the catalog; a browser voice name is stored as a harmless preference string |
+
+Coach answers are spoken **only when `voice_authorized` is true** — narration is an
+explicit opt-in, off by default (`voice_authorized` defaults false, migrated with a
+server default so existing accounts are backfilled without speaking unprompted).
+
 ## Achievements (all 🔒, ACH-005..007)
 
 The catalog lives in code (`app/achievements/catalog.py`, 200+ ladder steps
