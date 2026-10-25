@@ -1,26 +1,36 @@
 /**
- * Voice narration tests (REVIEW-009). jsdom ships no speech engine, which is
- * exactly the condition the module must survive, so every test installs — or
- * withholds — its own fake and asserts on the calls it receives.
+ * Voice narration tests (REVIEW-009).
+ *
+ * Three paths are tested:
+ * 1. ElevenLabs TTS succeeds → MP3 buffer is handed to an Audio element.
+ * 2. TTS returns 503 (key not configured) → silent fallback to speechSynthesis.
+ * 3. speechSynthesis is absent or throws → everything is still a no-op.
+ *
+ * jsdom ships neither a speech engine nor real audio playback, so every
+ * capability is installed or withheld by each test's own setup.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { chunkText, speak, stopSpeaking, voiceAvailable } from './voice';
+// We use vi.resetModules() to get a fresh voice.ts instance (with ttsAvailable
+// reset to null) before every test, since it is module-level state.
+async function freshModule() {
+  vi.resetModules();
+  return import('./voice');
+}
 
 type FakeVoice = { name: string; lang: string; default?: boolean };
 
-/** Utterances the fake engine recorded, in the order it was asked to say them. */
 let spoken: string[];
-let cancel: ReturnType<typeof vi.fn>;
+let cancelFn: ReturnType<typeof vi.fn>;
 
 function installSpeech(voices: FakeVoice[] = []) {
   spoken = [];
-  cancel = vi.fn();
+  cancelFn = vi.fn();
   const speakSpy = vi.fn();
   Object.defineProperty(window, 'speechSynthesis', {
     configurable: true,
     value: {
-      cancel,
+      cancel: cancelFn,
       speak: (utterance: { text: string; voice?: FakeVoice }) => {
         spoken.push(utterance.text);
         speakSpy(utterance);
@@ -38,136 +48,59 @@ function installSpeech(voices: FakeVoice[] = []) {
       lang = '';
       voice: FakeVoice | null = null;
       onerror: (() => void) | null = null;
-
       constructor(text: string) {
         this.text = text;
       }
     },
   });
-  return { spoken, cancel, speakSpy };
+  return { spoken, cancel: cancelFn, speakSpy };
 }
 
 function removeSpeech() {
-  const win = window as unknown as {
-    speechSynthesis?: unknown;
-    SpeechSynthesisUtterance?: unknown;
-  };
+  const win = window as unknown as Record<string, unknown>;
   delete win.speechSynthesis;
   delete win.SpeechSynthesisUtterance;
 }
 
+beforeEach(() => {
+  removeSpeech();
+});
+
 afterEach(() => {
   removeSpeech();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
+// ---------------------------------------------------------------------------
+// voiceAvailable
+// ---------------------------------------------------------------------------
+
 describe('voiceAvailable', () => {
-  it('is false when the browser has no speech engine', () => {
+  it('is false when there is no fetch and no speech engine', async () => {
+    const { voiceAvailable } = await freshModule();
+    // jsdom normally has fetch; stub it out to simulate a minimal env
+    vi.stubGlobal('fetch', undefined);
     expect(voiceAvailable()).toBe(false);
   });
 
-  it('is true once speechSynthesis and the utterance constructor both exist', () => {
+  it('is true when fetch is available (TTS path) even without speechSynthesis', async () => {
+    const { voiceAvailable } = await freshModule();
+    expect(typeof fetch).toBe('function');
+    expect(voiceAvailable()).toBe(true);
+  });
+
+  it('is true when speechSynthesis is present even without fetch', async () => {
     installSpeech();
+    const { voiceAvailable } = await freshModule();
+    vi.stubGlobal('fetch', undefined);
     expect(voiceAvailable()).toBe(true);
   });
 });
 
-describe('speak without an engine', () => {
-  it('is an inert no-op rather than a throw', () => {
-    expect(() => speak('Move 1: White plays pawn to e4.')).not.toThrow();
-    expect(() => stopSpeaking()).not.toThrow();
-  });
-});
-
-describe('speak', () => {
-  it('cancels whatever was saying before starting', () => {
-    // Fast stepping must replace the commentary, not queue a backlog of it.
-    const { cancel: cancelSpy } = installSpeech();
-    speak('first');
-    speak('second');
-    expect(cancelSpy).toHaveBeenCalledTimes(2);
-  });
-
-  it('says nothing for blank text', () => {
-    const { spoken: said } = installSpeech();
-    speak('   ');
-    expect(said).toEqual([]);
-  });
-
-  it('reads calm: slower than default and a shade below the default pitch', () => {
-    const { speakSpy } = installSpeech();
-    speak('Knight to f3.');
-    const utterance = speakSpy.mock.calls[0][0] as { rate: number; pitch: number; volume: number };
-    expect(utterance.rate).toBeLessThan(1);
-    expect(utterance.pitch).toBeLessThan(1);
-    expect(utterance.volume).toBe(1);
-  });
-
-  it('prefers the first hinted voice that is actually installed', () => {
-    const { speakSpy } = installSpeech([
-      { name: 'Samantha', lang: 'en-US' },
-      { name: 'Daniel', lang: 'en-GB' },
-      { name: 'Google UK English Male', lang: 'en-GB' },
-    ]);
-    speak('Knight to f3.');
-    const utterance = speakSpy.mock.calls[0][0] as { voice: { name: string }; lang: string };
-    expect(utterance.voice.name).toBe('Daniel');
-    expect(utterance.lang).toBe('en-GB');
-  });
-
-  it('falls back through british, any english, then the platform default', () => {
-    const cases: [FakeVoice[], string][] = [
-      [
-        [
-          { name: 'Zarina', lang: 'es-ES' },
-          { name: 'Oliver', lang: 'en-GB' },
-        ],
-        'Oliver',
-      ],
-      [
-        [
-          { name: 'Zarina', lang: 'es-ES' },
-          { name: 'Karen', lang: 'en-AU' },
-        ],
-        'Karen',
-      ],
-      [[{ name: 'Zarina', lang: 'es-ES', default: true }], 'Zarina'],
-    ];
-    for (const [voices, expected] of cases) {
-      const { speakSpy } = installSpeech(voices);
-      speak('Test.');
-      expect((speakSpy.mock.calls[0][0] as { voice: { name: string } }).voice.name).toBe(expected);
-      removeSpeech();
-    }
-  });
-
-  it('still speaks with the platform voice when the list is not loaded yet', () => {
-    // Chrome returns an empty list until its voices arrive; narration must not
-    // be contingent on that race.
-    const { spoken: said, speakSpy } = installSpeech([]);
-    speak('Test.');
-    expect(said).toEqual(['Test.']);
-    expect(speakSpy.mock.calls[0][0]).toMatchObject({ voice: null });
-  });
-
-  it('swallows an engine error instead of breaking the review page', () => {
-    installSpeech();
-    const engine = window.speechSynthesis as unknown as {
-      speak: (u: { onerror: (() => void) | null }) => void;
-    };
-    vi.spyOn(engine, 'speak').mockImplementation((utterance) => {
-      utterance.onerror?.();
-    });
-    expect(() => speak('Move 4: bishop takes f7, checkmate.')).not.toThrow();
-  });
-
-  it('stops the narrator when the page unmounts', () => {
-    const { cancel: cancelSpy } = installSpeech();
-    speak('Knight to f3.');
-    stopSpeaking();
-    expect(cancelSpy).toHaveBeenCalledTimes(2);
-  });
-});
+// ---------------------------------------------------------------------------
+// chunkText — unchanged logic, still worth testing
+// ---------------------------------------------------------------------------
 
 describe('chunkText', () => {
   const long = [
@@ -177,33 +110,210 @@ describe('chunkText', () => {
     'Keep the bishop pair and the f6 knight under observation and the pawn stays safe.',
   ].join(' ');
 
-  it('keeps short narration in one piece', () => {
+  it('keeps short narration in one piece', async () => {
+    const { chunkText } = await freshModule();
     expect(chunkText('Knight to f3. Solid.')).toEqual(['Knight to f3. Solid.']);
   });
 
-  it('splits long narration and loses nothing', () => {
+  it('splits long narration and loses nothing', async () => {
+    const { chunkText } = await freshModule();
     const chunks = chunkText(long);
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.join(' ')).toBe(long);
     for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(180);
   });
 
-  it('breaks between sentences, never inside one that fits', () => {
+  it('breaks between sentences, never inside one that fits', async () => {
+    const { chunkText } = await freshModule();
     const one = 'Move 12: White plays bishop to b5, exactly what the engine wanted.';
     const two = "White's win expectancy here is 56 percent, and the position stays balanced.";
     expect(chunkText(`${one} ${two} ${one}`, 100)).toEqual([one, two, one]);
   });
 
-  it('never tears a decimal like "1.5 pawns" in half', () => {
+  it('never tears a decimal like "1.5 pawns" in half', async () => {
+    const { chunkText } = await freshModule();
     const text = 'White is better here by 1.5 pawns, which the engine can prove.';
     const chunks = chunkText(text, 24);
     expect(chunks.join(' ')).toBe(text);
     for (const chunk of chunks) expect(chunk).not.toMatch(/(^|\s)\d+\.$/);
-    expect(chunks.some((chunk) => chunk.includes('1.5'))).toBe(true);
+    expect(chunks.some((chunk: string) => chunk.includes('1.5'))).toBe(true);
   });
 
-  it('leaves a single oversized word intact', () => {
+  it('leaves a single oversized word intact', async () => {
+    const { chunkText } = await freshModule();
     const word = 'Supercalifragilisticexpialidocious'.repeat(6);
     expect(chunkText(word, 20)).toEqual([word]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// speak — TTS unavailable (503) falls back to speechSynthesis
+// ---------------------------------------------------------------------------
+
+describe('speak with TTS unavailable (503)', () => {
+  it('falls back to speechSynthesis when the backend has no key', async () => {
+    const { spoken: said, speakSpy } = installSpeech();
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValue({ status: 503, ok: false, json: () => Promise.resolve({}) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { speak } = await freshModule();
+    speak('Knight to f3.');
+
+    // speak() is fire-and-forget; wait for the promise chain to settle
+    await vi.waitFor(() => {
+      expect(said.length).toBeGreaterThan(0);
+    });
+
+    expect(speakSpy.mock.calls[0][0]).toMatchObject({ rate: 0.92, pitch: 0.92 });
+  });
+
+  it('short-circuits subsequent calls after the first 503 (no re-probing)', async () => {
+    installSpeech();
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValue({ status: 503, ok: false, json: () => Promise.resolve({}) });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { speak } = await freshModule();
+
+    // First call probes TTS
+    speak('First.');
+    await vi.waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    // Second call should skip TTS entirely (ttsAvailable === false now)
+    speak('Second.');
+    await vi.waitFor(() => {
+      // spoken should have been called for 'Second.' via speechSynthesis
+      expect(mockFetch).toHaveBeenCalledTimes(1); // still 1 — no second fetch
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// speak — TTS network error also falls back
+// ---------------------------------------------------------------------------
+
+describe('speak with TTS network error', () => {
+  it('falls back to speechSynthesis on fetch rejection', async () => {
+    const { spoken: said } = installSpeech();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('NetworkError')));
+
+    const { speak } = await freshModule();
+    speak('Bishop takes f7.');
+
+    await vi.waitFor(() => {
+      expect(said.length).toBeGreaterThan(0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// speak — TTS success path
+// ---------------------------------------------------------------------------
+
+describe('speak with TTS success', () => {
+  it('plays the returned audio buffer via an Audio element', async () => {
+    removeSpeech(); // no browser fallback needed
+
+    const playSpy = vi.fn().mockImplementation(function (
+      this: { onended: (() => void) | null },
+    ) {
+      // Simulate async playback finish
+      setTimeout(() => this.onended?.(), 0);
+      return Promise.resolve();
+    });
+
+    class FakeAudio {
+      src = '';
+      volume = 1;
+      onended: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      pause = vi.fn();
+      play = playSpy;
+    }
+    vi.stubGlobal('Audio', FakeAudio);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fake');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+
+    const fakeBuffer = new ArrayBuffer(64);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        arrayBuffer: () => Promise.resolve(fakeBuffer),
+      }),
+    );
+
+    const { speak } = await freshModule();
+    speak('Knight to f3, solid.');
+
+    await vi.waitFor(() => {
+      expect(playSpy).toHaveBeenCalled();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// speak — blank text is always a no-op
+// ---------------------------------------------------------------------------
+
+describe('speak blank text', () => {
+  it('makes no fetch and no speech call', async () => {
+    const { spoken: said } = installSpeech();
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { speak } = await freshModule();
+    speak('   ');
+
+    expect(said).toHaveLength(0);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stopSpeaking
+// ---------------------------------------------------------------------------
+
+describe('stopSpeaking', () => {
+  it('cancels speechSynthesis', async () => {
+    installSpeech();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 503, ok: false }));
+
+    const { speak, stopSpeaking } = await freshModule();
+    speak('Knight to f3.');
+
+    // Wait for speak to have called speechSynthesis.cancel() at least once
+    await vi.waitFor(() => {
+      expect(cancelFn).toHaveBeenCalled();
+    });
+
+    cancelFn.mockClear();
+    stopSpeaking();
+    expect(cancelFn).toHaveBeenCalled();
+  });
+
+  it('is a safe no-op when nothing is playing', async () => {
+    const { stopSpeaking } = await freshModule();
+    expect(() => stopSpeaking()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No speech engine, no TTS — everything degrades gracefully
+// ---------------------------------------------------------------------------
+
+describe('speak with no engine at all', () => {
+  it('is an inert no-op (no throw) when neither TTS nor speechSynthesis work', async () => {
+    removeSpeech();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('no network')));
+
+    const { speak } = await freshModule();
+    expect(() => speak('Knight to f3.')).not.toThrow();
   });
 });

@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     coach_history_max_turns: int = 8
     coach_line_max_steps: int = 8
     log_level: str = "INFO"
+    # ElevenLabs TTS proxy (optional; free tier = 10k chars/month). Empty key
+    # means the browser's speechSynthesis fallback is used instead. Never
+    # commit a real key — the API endpoint is server-side only (the browser
+    # never sees this value). Default voice/model are among the free-tier
+    # premium voices; swap via ELEVENLABS_VOICE_ID / ELEVENLABS_MODEL_ID.
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = "pNInz6obpgDQGcFmaJgB"  # Adam (free-tier API accessible)
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
     # MON-001: JSON lines are the default; false restores the text format.
     log_json: bool = True
 

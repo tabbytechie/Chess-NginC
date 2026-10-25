@@ -464,11 +464,12 @@ describe('ReviewPage tour (REVIEW-007/008/009)', () => {
     expect(texts).toEqual([]);
   });
 
-  it('offers the voice toggle only when the browser can speak', async () => {
+  it('shows the voice toggle even without speechSynthesis (TTS is always an option)', async () => {
     vi.spyOn(api, 'getGameReview').mockResolvedValue(review());
+    // Without speechSynthesis: fetch exists, so voiceAvailable() is true (TTS path).
     const withoutSpeech = renderReview();
     await withoutSpeech.findByText('Move 1 of 2');
-    expect(screen.queryByRole('button', { name: /voice/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /voice/i })).toBeInTheDocument();
     withoutSpeech.unmount();
     cleanup();
 

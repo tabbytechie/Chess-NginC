@@ -47,6 +47,10 @@ services:
       smtp_username: ${SMTP_USERNAME:-}
       smtp_password: ${SMTP_PASSWORD:-}
       smtp_from: ${SMTP_FROM:-}
+      # ElevenLabs TTS proxy (empty key = browser speechSynthesis fallback).
+      elevenlabs_api_key: ${ELEVENLABS_API_KEY:-}
+      elevenlabs_voice_id: ${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+      elevenlabs_model_id: ${ELEVENLABS_MODEL_ID:-eleven_flash_v2_5}
     ports:
       - "${API_PORT:-8000}:8000"
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --ws-max-size 4096"
