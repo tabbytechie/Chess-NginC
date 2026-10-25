@@ -370,3 +370,45 @@ class CoachPatternsResponse(BaseModel):
 
     summary: str = ""
     items: list[CoachPattern] = Field(default_factory=list)
+
+
+class VoiceOption(BaseModel):
+    """One selectable narration voice.
+
+    `engine` says how it is produced: `eleven` (server proxy, needs a key with
+    the text_to_speech permission) or `browser` (the OS speech engine, always
+    free/offline). `id` is the ElevenLabs voice id for `eleven`, or the browser
+    voice name for `browser`. `available` is False for premium voices when no
+    working key is configured, so the UI can grey them out honestly.
+    """
+
+    id: str
+    name: str
+    engine: str
+    available: bool = True
+
+
+class VoiceListResponse(BaseModel):
+    """The curated free-tier ElevenLabs voices the server will proxy to."""
+
+    voices: list[VoiceOption] = Field(default_factory=list)
+
+
+class VoicePreferencesResponse(BaseModel):
+    """The caller's stored voice choice + whether the AI is authorized to speak."""
+
+    voice_authorized: bool
+    voice_id: str
+
+
+class VoicePreferencesUpdate(BaseModel):
+    """Partial update: change consent, the voice, or both.
+
+    `voice_id` is a short preference string (empty = browser default, an
+    allowlisted id = an ElevenLabs voice, anything else = an OS voice name). The
+    provider call at `POST /tts` is what enforces the allowlist; storing a name
+    here is harmless and never reaches ElevenLabs.
+    """
+
+    voice_authorized: bool | None = None
+    voice_id: str | None = Field(default=None, max_length=64)

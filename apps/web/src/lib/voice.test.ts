@@ -219,9 +219,7 @@ describe('speak with TTS success', () => {
   it('plays the returned audio buffer via an Audio element', async () => {
     removeSpeech(); // no browser fallback needed
 
-    const playSpy = vi.fn().mockImplementation(function (
-      this: { onended: (() => void) | null },
-    ) {
+    const playSpy = vi.fn().mockImplementation(function (this: { onended: (() => void) | null }) {
       // Simulate async playback finish
       setTimeout(() => this.onended?.(), 0);
       return Promise.resolve();

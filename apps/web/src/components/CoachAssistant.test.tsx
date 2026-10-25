@@ -3,18 +3,44 @@
  * walking the review tour, cross-game pattern recall, and the offline-friendly
  * error surface. The API is always mocked — nothing here reaches a real engine.
  */
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import CoachAssistant from './CoachAssistant';
 import { ApiError, api } from '../lib/api-client';
+import * as voice from '../lib/voice';
 import type {
   AssistantAnswerResponse,
   AssistantLineStep,
   CoachPatternsResponse,
+  VoiceOption,
 } from '../lib/api-types';
+
+// The coach panel hydrates its voice bar on mount; keep those calls mocked and
+// offline-safe so no test reaches the network and defaults stay deterministic.
+// Speak/selection are the narrator side effects we assert on, so swap just those
+// while keeping the real availability/list helpers the component also calls.
+vi.mock('../lib/voice', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/voice')>();
+  return {
+    ...actual,
+    speak: vi.fn(),
+    stopSpeaking: vi.fn(),
+    setVoiceSelection: vi.fn(),
+  };
+});
+
+beforeEach(() => {
+  vi.spyOn(api, 'getVoicePrefs').mockResolvedValue({ voice_authorized: false, voice_id: '' });
+  vi.spyOn(api, 'listVoices').mockResolvedValue({ voices: [] });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+});
 
 const ANSWER: AssistantAnswerResponse = {
   answer: 'Your c5 blunder hung a pawn; the engine preferred e5.',
@@ -189,5 +215,83 @@ describe('CoachAssistant conversation memory and line walks', () => {
     const play = await screen.findByRole('button', { name: /Show this line on the board/i });
     await user.click(play);
     expect(onPlayLine).toHaveBeenCalledWith(LINE_ANSWER.line, 'How the game went');
+  });
+});
+
+async function askOnce(user: ReturnType<typeof userEvent.setup>, text = 'what went wrong?') {
+  await user.type(screen.getByLabelText('Ask the coach about this game'), text);
+  await user.click(screen.getByRole('button', { name: 'Send question' }));
+  return screen.findByText(ANSWER.answer);
+}
+
+describe('CoachAssistant voice', () => {
+  it('stays silent when the coach voice is not authorized', async () => {
+    // Default prefs mock: voice_authorized false.
+    vi.spyOn(api, 'askCoach').mockResolvedValue(ANSWER);
+    const { user } = renderPanel();
+    await askOnce(user);
+    expect(voice.speak).not.toHaveBeenCalled();
+  });
+
+  it('speaks the answer once the stored preference authorizes the voice', async () => {
+    vi.spyOn(api, 'getVoicePrefs').mockResolvedValue({ voice_authorized: true, voice_id: '' });
+    vi.spyOn(api, 'askCoach').mockResolvedValue(ANSWER);
+    const { user } = renderPanel();
+
+    const consent = await screen.findByRole('checkbox', { name: 'Let the coach speak' });
+    await waitFor(() => expect(consent).toBeChecked());
+
+    await askOnce(user);
+    expect(voice.speak).toHaveBeenCalledWith(ANSWER.answer);
+  });
+
+  it('persists the consent toggle when the user authorizes the coach', async () => {
+    const save = vi
+      .spyOn(api, 'saveVoicePrefs')
+      .mockResolvedValue({ voice_authorized: true, voice_id: '' });
+    const { user } = renderPanel();
+
+    const consent = await screen.findByRole('checkbox', { name: 'Let the coach speak' });
+    expect(consent).not.toBeChecked();
+    await user.click(consent);
+
+    expect(save).toHaveBeenCalledWith({ voice_authorized: true });
+    await waitFor(() => expect(consent).toBeChecked());
+  });
+
+  it('lists the free premium catalog and forwards a pick to selection and storage', async () => {
+    const catalog: VoiceOption[] = [
+      { id: 'OnwK4e9ZLuTAKqWW03F9', name: 'Daniel', engine: 'eleven', available: true },
+      { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', engine: 'eleven', available: true },
+    ];
+    vi.spyOn(api, 'listVoices').mockResolvedValue({ voices: catalog });
+    const save = vi
+      .spyOn(api, 'saveVoicePrefs')
+      .mockResolvedValue({ voice_authorized: false, voice_id: 'OnwK4e9ZLuTAKqWW03F9' });
+    const { user } = renderPanel();
+
+    const select = await screen.findByLabelText('Narration voice');
+    await waitFor(() =>
+      expect(within(select).getByRole('option', { name: 'Rachel' })).toBeInTheDocument(),
+    );
+
+    await user.selectOptions(select, 'OnwK4e9ZLuTAKqWW03F9');
+    expect(voice.setVoiceSelection).toHaveBeenCalledWith({
+      engine: 'eleven',
+      id: 'OnwK4e9ZLuTAKqWW03F9',
+    });
+    expect(save).toHaveBeenCalledWith({ voice_id: 'OnwK4e9ZLuTAKqWW03F9' });
+  });
+
+  it('marks a premium voice unavailable when no key is configured', async () => {
+    const catalog: VoiceOption[] = [
+      { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', engine: 'eleven', available: false },
+    ];
+    vi.spyOn(api, 'listVoices').mockResolvedValue({ voices: catalog });
+    renderPanel();
+
+    const select = await screen.findByLabelText('Narration voice');
+    const option = await waitFor(() => within(select).getByRole('option', { name: /Adam/ }));
+    expect(option).toBeDisabled();
   });
 });
