@@ -4,21 +4,39 @@
  * Protected: dashboard + game pages.
  * Header: brand + nav left, theme switcher and account menu right;
  * logout lives in the account menu, not in page content.
+ * RB-006: the four pages behind top-level navigation are code-split; the
+ * dashboard's first paint no longer pays for the review/coach/drill UI.
  */
+import { Suspense, lazy, type ReactNode } from 'react';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
 
 import RequireAuth from './app/RequireAuth';
 import { useAuth } from './app/useAuth';
-import AchievementsPage from './pages/AchievementsPage';
 import ThemeToggle from './components/ThemeToggle';
 import UserMenu from './components/UserMenu';
 import Dashboard from './pages/Dashboard';
 import GamePage from './pages/GamePage';
-import LearnPage from './pages/LearnPage';
-import LobbyPage from './pages/LobbyPage';
-import OnlineGamePage from './pages/OnlineGamePage';
-import ReviewPage from './pages/ReviewPage';
 import { ForgotPasswordPage, LoginPage, RegisterPage, ResetPasswordPage } from './pages/AuthPages';
+
+const AchievementsPage = lazy(() => import('./pages/AchievementsPage'));
+const LearnPage = lazy(() => import('./pages/LearnPage'));
+const LobbyPage = lazy(() => import('./pages/LobbyPage'));
+const OnlineGamePage = lazy(() => import('./pages/OnlineGamePage'));
+const ReviewPage = lazy(() => import('./pages/ReviewPage'));
+
+function RouteFallback() {
+  // Distinct from AuthContext's "Loading…" (session restoration) so the two
+  // waiting states never read as each other.
+  return <div className="loading-state">Loading page…</div>;
+}
+
+function guarded(node: ReactNode) {
+  return (
+    <RequireAuth>
+      <Suspense fallback={<RouteFallback />}>{node}</Suspense>
+    </RequireAuth>
+  );
+}
 
 function Header() {
   const { user } = useAuth();
@@ -111,46 +129,11 @@ export default function App() {
             </RequireAuth>
           }
         />
-        <Route
-          path="/games/:id/review"
-          element={
-            <RequireAuth>
-              <ReviewPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/achievements"
-          element={
-            <RequireAuth>
-              <AchievementsPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/learn"
-          element={
-            <RequireAuth>
-              <LearnPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/lobby"
-          element={
-            <RequireAuth>
-              <LobbyPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/online/:id"
-          element={
-            <RequireAuth>
-              <OnlineGamePage />
-            </RequireAuth>
-          }
-        />
+        <Route path="/games/:id/review" element={guarded(<ReviewPage />)} />
+        <Route path="/achievements" element={guarded(<AchievementsPage />)} />
+        <Route path="/learn" element={guarded(<LearnPage />)} />
+        <Route path="/lobby" element={guarded(<LobbyPage />)} />
+        <Route path="/online/:id" element={guarded(<OnlineGamePage />)} />
         <Route
           path="*"
           element={

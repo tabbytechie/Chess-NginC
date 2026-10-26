@@ -270,17 +270,21 @@ describe('CoachAssistant voice', () => {
       .mockResolvedValue({ voice_authorized: false, voice_id: 'OnwK4e9ZLuTAKqWW03F9' });
     const { user } = renderPanel();
 
-    const select = await screen.findByLabelText('Narration voice');
-    await waitFor(() =>
-      expect(within(select).getByRole('option', { name: 'Rachel' })).toBeInTheDocument(),
-    );
+    // The themed popover trigger replaces the old native <select>.
+    const trigger = await screen.findByRole('button', { name: 'Narration voice' });
+    await user.click(trigger);
+    const menu = await screen.findByRole('listbox', { name: 'Narration voice' });
+    const daniel = within(menu).getByRole('option', { name: /Daniel/ });
+    expect(within(menu).getByRole('option', { name: /Rachel/ })).toBeInTheDocument();
 
-    await user.selectOptions(select, 'OnwK4e9ZLuTAKqWW03F9');
+    await user.click(daniel);
     expect(voice.setVoiceSelection).toHaveBeenCalledWith({
       engine: 'eleven',
       id: 'OnwK4e9ZLuTAKqWW03F9',
     });
     expect(save).toHaveBeenCalledWith({ voice_id: 'OnwK4e9ZLuTAKqWW03F9' });
+    // Choosing closes the popover.
+    expect(screen.queryByRole('listbox', { name: 'Narration voice' })).not.toBeInTheDocument();
   });
 
   it('marks a premium voice unavailable when no key is configured', async () => {
@@ -288,10 +292,11 @@ describe('CoachAssistant voice', () => {
       { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', engine: 'eleven', available: false },
     ];
     vi.spyOn(api, 'listVoices').mockResolvedValue({ voices: catalog });
-    renderPanel();
+    const { user } = renderPanel();
 
-    const select = await screen.findByLabelText('Narration voice');
-    const option = await waitFor(() => within(select).getByRole('option', { name: /Adam/ }));
-    expect(option).toBeDisabled();
+    const trigger = await screen.findByRole('button', { name: 'Narration voice' });
+    await user.click(trigger);
+    const menu = await screen.findByRole('listbox', { name: 'Narration voice' });
+    expect(within(menu).getByRole('option', { name: /Adam/ })).toBeDisabled();
   });
 });

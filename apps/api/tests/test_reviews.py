@@ -4,6 +4,7 @@ and the POST/GET review endpoints (REVIEW-001..005)."""
 import chess
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from app.api.v1.serializers import to_review_response
 from app.engine.classifier import (
@@ -12,10 +13,16 @@ from app.engine.classifier import (
     centipawn_loss,
     classify_move,
 )
-from app.engine.provider import AnalyseRequest, AnalysisResult, PrincipalVariation
+from app.engine.provider import (
+    AnalyseRequest,
+    AnalysisResult,
+    BatchedEngineProvider,
+    PrincipalVariation,
+)
 from app.engine.stockfish import StockfishUnavailableError
 from app.models.game_move import GameMove as GameMoveRow
 from app.models.game_review import GameReview
+from app.reviews import service as review_service
 from app.reviews.annotate import annotate_moves
 from app.reviews.explainer import explain_move
 from app.reviews.service import _accuracy, analyse_game
@@ -390,6 +397,147 @@ class TestReviewEndpoints:
         assert resp.status_code == 200
         assert resp.json()["status"] == "failed"
         assert "no binary" in (resp.json()["error"] or "")
+
+
+class _KernelStubProvider:
+    """Wraps a plain analysis provider with the batch protocol (kernel tests)."""
+
+    name = "kernel-scripted"
+
+    def __init__(self, inner: _ScriptedProvider) -> None:
+        self._inner = inner
+
+    def analyse(self, request: AnalyseRequest) -> AnalysisResult:
+        return self._inner.analyse(request)
+
+    def __enter__(self) -> BatchedEngineProvider:
+        return self  # type: ignore[return-value]
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class TestGenerateOrGetKernel:
+    """RB-002: the kernel is replay → commit (release) → search → short write."""
+
+    def test_kernel_stores_exactly_what_direct_analysis_produces(
+        self, authed_client: tuple[TestClient, dict], db: Session
+    ) -> None:
+        client, user = authed_client
+        gid = _finished_local_game(client)
+        repo_moves = review_service._game_moves(db, gid)
+
+        # One and the same scripted provider answers both paths, so identical
+        # output can only fail on a wiring bug — never on engine nondeterminism.
+        scripted = _ScriptedProvider()
+        direct = analyse_game(scripted, repo_moves)
+
+        def factory(*_a: object, **_k: object) -> _KernelStubProvider:
+            return _KernelStubProvider(scripted)
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(review_service, "open_stockfish_provider", factory)
+            review = review_service.generate_or_get(db, gid, user["id"])
+        finally:
+            monkey.undo()
+
+        assert review.status == "completed"
+        assert review.payload == direct
+        assert review.provider == _KernelStubProvider.name
+        assert review.depth == review_service.REVIEW_DEPTH
+        assert review.hero_color == "w"
+        # The kernel committed its row for real — the same session reads it back.
+        assert db.query(GameReview).filter_by(game_id=gid).one().payload == direct
+
+    def test_connection_is_released_across_the_engine_batch(
+        self, authed_client: tuple[TestClient, dict], db: Session
+    ) -> None:
+        # The session is bound to the test engine, so that engine's pool is the
+        # observation point: when the seconds-long batch runs, the session must
+        # hold nothing — no open transaction and no checked-out connection.
+        client, user = authed_client
+        gid = _finished_local_game(client)
+        seen: list[bool] = []
+
+        original = review_service.analyse_plies
+
+        def spy(provider: object, plies: object, final_board: object) -> dict:
+            held = db.in_transaction() or db.get_bind().pool.checkedout() > 0
+            seen.append(held)
+            return original(provider, plies, final_board)  # type: ignore[arg-type]
+
+        def stub_factory(*_a: object, **_k: object) -> _KernelStubProvider:
+            return _KernelStubProvider(_ScriptedProvider())
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(review_service, "analyse_plies", spy)
+            monkey.setattr(review_service, "open_stockfish_provider", stub_factory)
+            review = review_service.generate_or_get(db, gid, user["id"])
+        finally:
+            monkey.undo()
+
+        assert seen == [False]  # searched with no transaction and no held connection
+        assert review.status == "completed"
+
+
+class TestReviewHttpCache:
+    """RB-005: the GET path carries a stable content ETag + 304 revalidation."""
+
+    @pytest.fixture(autouse=True)
+    def _deterministic_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Patch the whole scenario onto one deterministic engine (forced re-run
+        # included), so a byte-identical payload is a fact about the code, not a
+        # coin-flip on a real engine — the validator must never churn for it.
+        def factory(*_a: object, **_k: object) -> _KernelStubProvider:
+            return _KernelStubProvider(_ScriptedProvider())
+
+        monkeypatch.setattr(review_service, "open_stockfish_provider", factory)
+
+    def _first_etag(self, client: TestClient) -> tuple[int, str]:
+        gid = _finished_local_game(client)
+        assert client.post(f"/api/v1/games/{gid}/review", json={}).status_code == 200
+        first = client.get(f"/api/v1/games/{gid}/review")
+        assert first.status_code == 200
+        assert first.headers["ETag"]
+        assert first.headers["cache-control"] == "private, no-cache"
+        assert "etag" not in first.headers["vary"].lower()
+        return gid, first.headers["ETag"]
+
+    def test_etag_is_stable_and_304_skips_the_body(
+        self, authed_client: tuple[TestClient, dict]
+    ) -> None:
+        client, _ = authed_client
+        gid, etag = self._first_etag(client)
+
+        again = client.get(f"/api/v1/games/{gid}/review", headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.content == b""
+        assert again.headers["ETag"] == etag
+
+        forced = client.post(f"/api/v1/games/{gid}/review", json={"force": True})
+        assert forced.status_code == 200
+        after = client.get(f"/api/v1/games/{gid}/review", headers={"If-None-Match": etag})
+        # Byte-identical re-analysis: the row was rewritten, the content was not,
+        # so the recomputed validator still matches — and a plain GET without the
+        # header keeps serving the body.
+        assert after.status_code == 304
+        plain = client.get(f"/api/v1/games/{gid}/review")
+        assert plain.status_code == 200
+        assert plain.headers["ETag"] == etag
+
+    def test_other_players_never_share_the_validator(
+        self, authed_client: tuple[TestClient, dict], other_client: TestClient
+    ) -> None:
+        client, _ = authed_client
+        gid, etag = self._first_etag(client)
+        stale = client.get(f"/api/v1/games/{gid}/review", headers={"If-None-Match": '"deadbeef"'})
+        assert stale.status_code == 200
+        assert stale.headers["ETag"] == etag
+        # A foreign reviewer gets the ownership answer (404), never a 304.
+        foreign = other_client.get(f"/api/v1/games/{gid}/review", headers={"If-None-Match": etag})
+        assert foreign.status_code == 404
 
 
 def _payload_plies(sans: list[str], cp: int = 100, mate: int | None = None) -> list[dict]:

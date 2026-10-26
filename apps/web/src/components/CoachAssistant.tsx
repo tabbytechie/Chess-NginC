@@ -16,6 +16,7 @@ import type { FormEvent } from 'react';
 import { Lightbulb, Loader2, PlayCircle, Send, Volume2, X } from 'lucide-react';
 
 import { Button } from './ui/Button';
+import VoicePicker, { type VoicePickerOption } from './VoicePicker';
 import { ApiError, api } from '../lib/api-client';
 import type {
   AssistantAnswerResponse,
@@ -221,6 +222,23 @@ export default function CoachAssistant({
     void saveVoice({ voice_id: id });
   }
 
+  // ElevenLabs free voices first (the primary engine), then the OS voices; the
+  // picker groups them under headings and greys out any that need a key.
+  const voiceOptions: VoicePickerOption[] = [
+    ...elevenVoices.map((v) => ({
+      id: v.id,
+      name: v.name,
+      kind: 'eleven' as const,
+      available: v.available,
+    })),
+    ...browserVoices.map((v) => ({
+      id: v.id,
+      name: v.name,
+      kind: 'browser' as const,
+      available: true,
+    })),
+  ];
+
   return (
     <section className="coach-panel" aria-label="coach assistant">
       <header className="coach-head">
@@ -242,37 +260,16 @@ export default function CoachAssistant({
             <Volume2 size={14} aria-hidden="true" />
             Let the coach speak
           </label>
-          <label className="sr-only" htmlFor="coach-voice-select">
-            Narration voice
-          </label>
-          <select
-            id="coach-voice-select"
-            className="coach-voice-select"
+          <VoicePicker
+            label="Narration voice"
             value={voiceId}
-            onChange={(e) => pickVoice(e.target.value)}
+            options={voiceOptions}
+            groups
+            defaultOption={{ value: '', label: 'System default' }}
+            placeholder="System default"
+            onChange={pickVoice}
             disabled={savingVoice}
-          >
-            <option value="">Default (premium ElevenLabs when a key is set)</option>
-            {browserVoices.length > 0 && (
-              <optgroup label="Browser voices">
-                {browserVoices.map((v) => (
-                  <option key={`b-${v.id}`} value={v.id}>
-                    {v.name}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {elevenVoices.length > 0 && (
-              <optgroup label="Premium (ElevenLabs)">
-                {elevenVoices.map((v) => (
-                  <option key={`e-${v.id}`} value={v.id} disabled={!v.available}>
-                    {v.name}
-                    {v.available ? '' : ' — needs a key'}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
+          />
         </div>
       )}
 

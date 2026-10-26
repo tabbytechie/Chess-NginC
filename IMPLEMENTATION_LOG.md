@@ -1385,6 +1385,189 @@ boundary, 503/fallback semantics, opt-in default).
 play once an ElevenLabs key carrying the `text_to_speech` scope is set (see session (c))
 — until then every pick falls back to the browser voice.
 
+---
+
+## Session 2026-10-26 — Phase 13 / Stage 13A: Robustness & Concurrency (closes W1–W11 findings)
+
+**Task.** Turn the architecture-review weaknesses (W1–W11) into a decision-complete plan
+(`docs/robustness-plan.md`, staged 13A→13D) and land **Stage 13A** — the surgical,
+low-risk, immediate-value fixes — without giving up any invariant (offline-hermetic tests,
+CI gates = done, 404-on-foreign ownership, server owns every outcome, engine/voice/LLM
+behind their single seams, transport-agnostic `check_*` rate-limit signatures, behavior
+changes default OFF).
+
+**Scope decision.** 13A only this pass. 13B (review job queue + eval cache), 13C
+(Redis scale-out backends), 13D (quality ceilings) stay designed and **trigger-gated** —
+no queue/Redis/embeddings until a real condition demands them, the same discipline that
+made 12A cheap to land.
+
+**Files changed (backend).**
+- `core/database.py` (RB-001, W1): new settings `db_pool_size=5`/`db_max_overflow=5`/`db_pool_recycle=300`/`trust_proxy_headers=False`/`trusted_proxy_cidrs=""`; `create_engine` now passes `pool_size`/`max_overflow`/`pool_recycle`/`pool_pre_ping=True` (defaults were never set — pre_ping kills "server gone away" after a DB restart, recycle clears LB idle timeouts, sized for the single replica). Also exposes `RESOLVED_ENV_FILES` (W11) for the preflight log.
+- `reviews/service.py` (RB-002, W1): `_Ply` now carries plain scalars (`move_number`/`uci`/`san`) instead of the ORM row; `analyse_game` split into replay+delegate over a new `analyse_plies(provider, plies, final_board)`; `generate_or_get` replays+validates+**commits (returns the pooled connection)**, then runs the ~12 s engine batch on detached scalars, then a short write transaction. Held-connection time ~12 s → ~50 ms; grading is byte-for-byte unchanged (proven by test).
+- `api/v1/deps.py` (RB-004, W3 **launch blocker**): `client_ip(request)` + `_trusted_proxy_nets()`; `rate_limit_auth` keys on `client_ip`. Default OFF → today's behavior byte-for-byte; when ON and the peer is a trusted CIDR, walk XFF **right-to-left** to the closest hop that is not itself a trusted proxy (nginx `real_ip_recursive`), else ignore XFF from an untrusted peer (spoof guard). (A code-review pass corrected the original leftmost read — the shipped `nginx.conf` uses `$proxy_add_x_forwarded_for`, which *appends* the real client and leaves a client-forged leftmost value intact, so leftmost would have made the auth limiter bypassable once the flag is on.)
+- `api/v1/games.py` (RB-005, W7): content `ETag` + `Cache-Control: private, no-cache` on `GET /review`. (A code-review pass simplified the original design: the ETag is now an md5 of the exact **served body** rather than the stored payload, and the in-process memo + writer-side invalidation were dropped — this closes two holes at once: a cross-worker stale validator, and read-time annotations (`annotate_moves`, book `win_pct`) drifting under an unchanged stored payload.) `304` skips sending the (possibly large) body; POST path stays uncacheable.
+- `main.py` (RB-003, W11): startup `preflight` info log with resolved env files + engine mode (local/cloud/none) + voice/assistant booleans + `trust_proxy_headers` — names/booleans only, never a secret value (QA-019). (A code-review pass found the `JsonFormatter`'s fixed key set was silently dropping the `extra` payload, so `core/telemetry.py` now carries a `preflight` dict through, mirroring the `http_access` pattern.)
+
+**Files changed (frontend).**
+- `App.tsx` (RB-006, W10): Review/Learn/Online/Achievements/Lobby converted to `React.lazy` behind a `Suspense` + `RouteFallback` ("Loading page…"); Dashboard/GamePage/AuthPages stay eager. Dashboard first paint no longer pays for the coach panel + 829-drill UI.
+- `vite.config.ts` + `test/setup.ts` (frontend-gate determinism, landed alongside 13A): vitest `testTimeout`/`hookTimeout` 20 s + global `configure({ asyncUtilTimeout: 10000 })`. The full parallel run was intermittently red purely from CPU scheduling spilling past testing-library's 1 s `findBy*` default (each case passed in isolation); raising the ceiling once makes the gate deterministic.
+
+**Tests.**
+- New `tests/test_phase13_robustness.py`: `TestPoolGeometry` (pool size/overflow/pre-ping/recycle reflect settings) + `TestClientIp` (default-off, trusted rightmost-non-proxy hop, forged-leftmost ignored, inner trusted proxy walked past, untrusted peer ignores XFF, fallback on missing/garbage header, multi-CIDR/bad-entry) + `TestPreflightLogging` (the payload survives `JsonFormatter`, no secret reaches the line).
+- `tests/test_reviews.py`: `TestGenerateOrGetKernel` (payload byte-identical to direct `analyse_game`; connection released across the batch — spy asserts `held == False` via `db.in_transaction() or pool.checkedout() > 0`) + `TestReviewHttpCache` (ETag present, `private, no-cache`, 304 on match, 304 stable after byte-identical force, foreign → 404).
+- `App.test.tsx`: RB-006 lazy-route test.
+- `conftest.py`: no ephemeral ETag reset needed — the review RB-005 ETag is content-derived (the code-review pass dropped the in-process memo the autouse reset used to clear).
+
+**Gates (CI order, all green).** Backend: ruff check + format, mypy (89 files), alembic
+upgrade-head + check on a clean throwaway DB (no drift), `pytest` **495 passed** (up from
+480, +15 net new after the code-review pass). Frontend: eslint, `tsc --noEmit`, `vitest`
+**253 passed** (confirmed on two consecutive runs), `vite build` (per-page chunks emitted —
+ReviewPage etc. split out of the 364 kB index), prettier.
+
+**Decisions made.**
+- RB-004 (trusted proxy) defaults **OFF** so no live behavior changes until deployment.md documents the real proxy CIDRs.
+- RB-002 keeps the engine behind the existing `open_stockfish_provider` seam and releases the DB connection mid-request (safe: the conftest `client` shares the same `db` session, and a mid-request commit is intentional here).
+- RB-005 ETag is a content hash of the exact served body (not a TTL, not a memo) — structurally impossible to go stale across processes or a read-time-annotation deploy.
+
+**Defects discovered / resolved.**
+- Frontend vitest flakiness (8→1→1 failures under parallel contention) root-caused to the testing-library 1 s async default + 5 s vitest timeout, not logic — fixed by the determinism change above.
+- The RB-002 connection-release assertion initially targeted `database.engine.pool` (wrong engine — conftest binds `db` to its own test engine); corrected to observe the shared session's transaction/checkout state.
+
+**Remaining / next task.** RB-007 (`uvicorn[standard]` uvloop/httptools, W8/TD-010) stays
+**Blocked** until uvloop/httptools are pinned in `requirements.lock` for py3.12-linux and
+the hermetic container build is re-verified — kept open so the build never breaks. Stages
+13B–13D remain trigger-gated by design.
+
+---
+
+## Session 2026-10-26 (b) — Voice: ElevenLabs-only Review picker + `.env` repair; Stage 13E: tested backups + PITR
+
+**Task.** Three asks in one pass: (1) finish the Review/Coach voice picker so the free
+ElevenLabs voices are the *primary* choice (Rachel default, browser `speechSynthesis`
+demoted to an automatic fallback); (2) fix the reported "machinery" voice that never
+switched to ElevenLabs; (3) land the resilience items the user pointed at — scheduled +
+**restore-tested** backups and opt-in point-in-time recovery — and settle the "do the DBs
+have replicas?" question honestly in the plan.
+
+**Root cause of the "machinery" voice (config, not code).** Two independent `.env` faults
+made the server return 500/503 so the browser silently fell back to its robotic voice:
+- `apps/api/.env` (the file host `uvicorn` actually reads, via `env_file=".env"` relative to
+  `apps/api`) had **no** `ELEVENLABS_API_KEY` at all → the TTS proxy 503'd → fallback.
+- the **root** `.env` (read by `docker compose`) had a Mermaid `erDiagram` block pasted onto
+  the same line as the API key (corrupting it) and pointed at Adam, not Rachel.
+The picker is UI-only — audio changes only if the server holds a valid key, so both files had
+to be repaired. The stray schema diagram was not lost: it was recovered into
+`docs/architecture.md` as a proper "Data model (ER)" section.
+
+**Files changed (voice).**
+- `.env` (root, gitignored) + `apps/api/.env` (gitignored): clean `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM` (Rachel), `ELEVENLABS_MODEL_ID=eleven_flash_v2_5`; comments note the mirror requirement and key-rotation if it ever leaked.
+- `apps/web/src/components/VoicePicker.tsx` (new): themed a11y popover replacing the raw `<select>` — button trigger (`aria-haspopup`/`aria-expanded`), `listbox` with groups + a `defaultOption`, Escape / click-outside to dismiss; default export + `VoicePickerOption` type. ElevenLabs-only catalog; browser entries appear only as the automatic fallback.
+- `apps/web/src/pages/ReviewPage.tsx` + `components/CoachAssistant.tsx`: import corrected to `import VoicePicker, { type VoicePickerOption }` (was a named import of a default export → TS2614); `setVoiceSelection({engine:'eleven',…})` re-arms the availability probe.
+- `.env.example`: documents the `ELEVENLABS_*` keys for the docker path.
+
+**Files changed (durability / Stage 13E).**
+- `scripts/backup-db.sh` (REL-004): `pg_dump -Fc` + a `.dump.meta` integrity sidecar (sha256 + alembic version + `users/games/game_moves` counts captured at dump instant); `DB_IN_CONTAINER` (compose `db`) vs host mode; optional `RCLONE_TARGET` offsite copy; `BACKUP_KEEP=14` retention drops older dump+meta pairs.
+- `scripts/verify-backup.sh` (REL-005, new): restores the newest dump into a throwaway DB and asserts sha256 + alembic + row counts **against the sidecar** (never the live DB, so a racing write can't fail a good backup); `pg_restore --exit-on-error`; trap-drops the scratch DB; distinct non-zero exits (2 corrupt / 3 unloadable / 4 row-mismatch / 5 alembic).
+- `scripts/restore-db.sh`: `case` on extension — `.dump`→`pg_restore`, legacy `.sql`→`psql`.
+- `compose.pitr.yaml` (new, opt-in): turns `db` into a PITR primary (`wal_level=replica`, `archive_mode=on`, `archive_command`→`/wal_archive`); re-declares the full `volumes` list because Compose *replaces* sequence overrides.
+- `scripts/pitr-basebackup.sh` + `scripts/pitr-restore.sh` (new): streaming base backup (`-Ft -z -X stream`) and a **throwaway `:5433`** container recovery to `PITR_TARGET` (`recovery.signal` + `restore_command` + `recovery_target_time`, `promote`), never over live.
+- `pgbackrest.conf.example` + `scripts/backup-cron.example` (new): the prod PITR path (S3 repo, retention, at-rest encryption) and the schedule — nightly backup→verify chain, weekly base backup, monthly **oldest-backup** DRILL, plus a macOS launchd note.
+- `.gitignore`: `wal-archive/`, `pitr-recovery/`, `*.dump`, `*.dump.meta`, `*.tar`, `*.tar.gz`.
+
+**Tests.** No new backend tests (voice/durability work is config + shell + docs only; the
+`/tts` allowlist and selection were covered previously). Frontend: `VoicePicker.test.tsx`
+(new, 7) + `ReviewPage.test.tsx` picker cases migrated to pass the catalog through a
+parameterized `renderReview(path, voices, prefs)` — this fixed a real bug where `renderReview`
+re-installed `listVoices→{voices:[]}` and clobbered per-test mocks at mount.
+
+**Gates (CI order, all green).** Backend: ruff check + format (133 files), mypy (89 files),
+`pytest` **495 passed** (unchanged — no backend code touched). Frontend: eslint, `tsc
+--noEmit`, `vitest` **262 passed**, `vite build` (ReviewPage etc. split out of the 364 kB
+index), prettier. The first vitest pass flaked 2 CPU-timing cases (`App` login→lazy Dashboard,
+`OnlineGamePage` not-your-turn) only because the backend suite was running concurrently; both
+passed on a contention-free re-run — the same scheduling flake Stage 13A documented, not a
+regression. All five scripts `bash -n` clean; `docker compose -f compose.yaml -f
+compose.pitr.yaml config` valid. Voice verified offline: `settings` → `key_set=True`,
+voice `21m00Tcm4TlvDq8ikWAM` (Rachel), model `eleven_flash_v2_5`.
+
+**Decisions made.**
+- Voice stays **UI-only + config-driven**; no code path forces ElevenLabs when the server has no key (browser fallback remains correct). Users must hard-reload: `ttsAvailable` latches `false` for the whole page session after one 503.
+- 13E is **durability, not redundancy** (`docs/robustness-plan.md` Stage 13E): single-replica topology kept by design; RB-040 managed HA endpoint (flip one `database_url`) is the cheap 80% of a replica and stays trigger-gated to paid launch; read replicas deferred. PITR is opt-in so the default stack is byte-identical until you enable it.
+- The recovered `.env` key should be **verified/rotated** — the corrupted paste may have eaten a character.
+
+**Next task.** Nothing blocking. RB-040 (managed endpoint) is the only open 13E row and is
+launch-triggered. RB-007 (uvloop/httptools) stays Blocked on the py3.12 lockfile pin, per 13A.
+
+---
+
+## Session 2026-10-26 (c) — Voice follow-up: the real cause was ElevenLabs free-plan, not `.env`
+
+**Trigger.** After (b) the Mac STILL played the robotic browser voice ("works on Linux, not on
+Mac"). (b) had fixed the `.env` corruption and verified `key_set=True`, but that was necessary
+and not sufficient — a non-empty key is not a key that can actually synthesize.
+
+**Real root cause (found at runtime, not in config).** The Mac runs the Docker compose stack, so
+the container interpolates the **root** `.env` (NOT `apps/api/.env`, which is the host-uvicorn
+path) and re-reads it only on **recreate** — editing `.env` without `docker compose up -d api`
+is exactly why the user "saw no change". Probing the live container and ElevenLabs directly gave
+the ground truth:
+- The running container held the OLD `…66f7f0` key → ElevenLabs **401 `missing_permissions`** ("missing the permission text_to_speech").
+- The root `.env` key (`…1c0f57`) authenticates AND has `text_to_speech`, but every call hit **402 `paid_plan_required`: "Free users cannot use library voices via the API."**
+- Per-voice test with that key: Rachel `21m00Tcm…` → **402**; **Adam `pNInz6ob…` → 200 audio**; **George `JBFqnCBs…` → 200 audio**; old Daniel `OnwK4e9Z…` → **404**. So the blocker was never code or the key — it was that the picker defaulted to **Rachel, a shared library voice a free plan cannot render via the API**.
+
+**Fix (stays free — no upgrade).** Default the whole stack to a voice the free API can use.
+- `app/api/v1/tts.py`: `FREE_ELEVEN_VOICES` curated to the verified-working **Adam + George** (dropped Rachel/402, Daniel/404) so every picker option actually speaks.
+- `app/core/database.py`: default `elevenlabs_voice_id` Rachel → **Adam**.
+- `compose.yaml` + `compose.dev.yaml`: `${ELEVENLABS_VOICE_ID:-…}` default → Adam.
+- `.env`, `apps/api/.env`, `.env.example`: `ELEVENLABS_VOICE_ID=Adam`; both `.env` files aligned to the single TTS-permissioned key.
+- `apps/web/src/pages/ReviewPage.tsx`: `REVIEW_DEFAULT_VOICE_ID` + the pre-catalog fallback label Rachel → **Adam**.
+
+**Tests.** `ReviewPage.test.tsx` narration-picker cases re-based on Adam (default) + George (pick)
++ Adam-unavailable. `test_tts.py` unchanged (it indexes `FREE_ELEVEN_VOICES`, never pins a name).
+
+**Gates (all green).** Backend ruff/format/mypy (89) + `pytest` **495 passed** (exit 0). Frontend
+eslint/tsc/build/prettier ✓; vitest **262 passed** in a contention-free run (an aggregate run
+showed only the known OnlineGamePage async-timing flake — passes in isolation, unrelated to voice).
+
+**Verified end-to-end.** After `docker compose up -d --build api web`: container `voice=…Adam`,
+`GET /tts/voices` → `[Adam, George] available`, and `POST /tts` with an **empty** voice (server
+default) → **HTTP 200, audio/mpeg, 50 KB**. Users must refresh the browser to load the rebuilt
+web bundle. To add more free-plan voices, create an account-owned voice in ElevenLabs VoiceLab
+and append its id to `FREE_ELEVEN_VOICES`.
+
+## Session 2026-10-26 (d) — Voice STILL robotic on Mac: the stale-bundle cache footgun
+
+**Trigger.** After (c) the app was proven to serve real ElevenLabs Adam audio, yet the user
+reported the Mac was "still that bad voice". Re-verified at runtime that the server side was
+healthy: both gitignored `.env` files carry the `text_to_speech` key, the container default is
+Adam, the served bundle references Adam (no Rachel id), `lsof` shows the browser can only reach
+the compose stack (`:5173`/`:8000`, no host vite/uvicorn), the logged-in user's stored
+`voice_id` is already Adam, and a real `POST /tts` (empty + explicit Adam/George) returns
+**200 audio/mpeg** through BOTH `:8000` and the web proxy `:5173`. So the backend was never the
+problem again — the client was stuck on an OLD cached bundle (Rachel default → 402 → browser
+fallback). (c)'s "must refresh the browser" caveat was the real, unresolved issue.
+
+**Root cause.** `apps/web/nginx.conf` set NO `Cache-Control` on any response. For `index.html`
+that means browsers apply *heuristic* caching and keep serving a stale shell that points at the
+previous build's hashed chunks — a rebuilt web image silently never loads on a normal navigation.
+
+**Fix (infra, stays free).** Explicit cache policy in `apps/web/nginx.conf`:
+- `location /` (index.html): `expires -1;` → `Cache-Control: no-cache`, so the shell revalidates
+  every load (304 when unchanged) and a rebuilt bundle is picked up without a hard refresh.
+- `location /assets/` (content-hashed chunks): `expires max;` → `max-age=315360000`, cached ~10y;
+  a code change yields a new filename, so a stale bundle can never be served under a live name.
+- Chose the `expires` directive over `add_header` deliberately: nginx drops server-level
+  `add_header`s as soon as a block declares its own, so `expires` keeps the security headers
+  (nosniff / DENY / no-referrer) inherited on every static response.
+
+**Verified end-to-end.** Validated with `nginx -t` inside `chessnginc_default` (the `api` upstream
+only resolves on that network), then `docker compose up -d --build web` (exit 0, healthy). Live
+headers confirmed: `/` → `Cache-Control: no-cache`; `/assets/index-*.js` → `max-age=315360000`;
+security headers still present on both; `POST /tts` (Adam) via the fresh proxy → **200
+audio/mpeg**. Only `nginx.conf` changed, which is outside every source gate (Prettier has no
+nginx parser; CI has no Docker-build step), so the (c) green gates stand. The user needs one more
+refresh to drop the old cached shell; after that, future rebuilds load automatically.
+
 
 
 

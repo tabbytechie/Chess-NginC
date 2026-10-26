@@ -162,4 +162,21 @@ describe('App routing (WEB-004/005/006/008)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Password updated');
     expect(reset).toHaveBeenCalledWith({ token: 'abc123def456ghi789', password: 'brand-new-pass' });
   });
+
+  it('lazy-loads a code-split page behind its Suspense boundary (RB-006)', async () => {
+    vi.spyOn(api, 'me').mockResolvedValueOnce({ id: 1, email: 'a@b.co', points: 0 });
+    vi.spyOn(api, 'trainingSummary').mockResolvedValue({
+      puzzles_solved: 0,
+      streak: 0,
+      mine_available: 0,
+      themes: {},
+    } as never);
+    vi.spyOn(api, 'trainingMine').mockResolvedValue([] as never);
+
+    // /learn is no longer in the eager chunk (the build proves the split);
+    // this asserts the lazily imported page still renders correctly through
+    // its Suspense boundary (async queries get their headroom from setup.ts).
+    renderApp('/learn');
+    expect(await screen.findByRole('heading', { name: 'Learn the patterns' })).toBeInTheDocument();
+  });
 });

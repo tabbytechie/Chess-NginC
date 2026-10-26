@@ -47,11 +47,14 @@ RATE_LIMIT_PER_MINUTE = 20
 # Curated free-tier premade voices. `name` is for the picker; the `id` is the
 # only value ever accepted from a client and the only one interpolated into the
 # provider URL. These require the API key to carry the text_to_speech scope.
+# Free-tier premade voices, narrowed to the ids the free-plan API actually
+# synthesizes: Adam and George both return audio on a free key, whereas the
+# shared "library" voice Rachel returns 402 paid_plan_required and the former
+# Daniel id 404s. Keeping this list to verified-working ids means every picker
+# option speaks instead of silently falling back to the robotic browser voice.
 FREE_ELEVEN_VOICES: tuple[tuple[str, str], ...] = (
-    ("21m00Tcm4TlvDq8ikWAM", "Rachel"),
     ("pNInz6obpgDQGcFmaJgB", "Adam"),
     ("JBFqnCBsd6RMkjVDRZzb", "George"),
-    ("OnwK4e9ZLuTAKqWW03F9", "Daniel"),
 )
 _ALLOWED_VOICE_IDS = frozenset(voice_id for voice_id, _ in FREE_ELEVEN_VOICES)
 

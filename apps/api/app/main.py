@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 import time
 from collections.abc import Awaitable, Callable
 
@@ -16,10 +17,14 @@ from app.api.v1.health import router as health_router
 from app.api.v1.online import router as online_router
 from app.api.v1.training import router as training_router
 from app.api.v1.tts import router as tts_router
-from app.core.database import settings
+from app.core.database import RESOLVED_ENV_FILES, settings
 from app.core.telemetry import access_logger, new_request_id, request_id_var
+from app.engine import stockfish
 
 API_V1_PREFIX = "/api/v1"
+
+# RB-003's own line rides the app logger (telemetry configured it at import).
+logger = logging.getLogger("chess-engine-api")
 
 # Paths kept out of the access log: the compose healthcheck and the Prometheus
 # scrape both fire every few seconds and would bury real lines.
@@ -86,6 +91,35 @@ async def request_id_middleware(
 # out of the OpenAPI spec (the contract test types every documented operation;
 # a plaintext scrape endpoint has no response model to declare).
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+
+# RB-003: one boot line that answers the questions an outage investigation
+# always starts with — which .env was actually read (the path is CWD-relative,
+# the recurring trap), which engine will answer, whether voice synthesis has a
+# key. booleans/counts only: a key value is never logged (QA-019).
+def _engine_mode() -> str:
+    try:
+        resolved = stockfish.resolve_binary(settings.stockfish_path)
+    except stockfish.StockfishUnavailableError:
+        resolved = ""
+    if resolved:
+        return "local"
+    return "cloud" if settings.stockfish_api_key else "none"
+
+
+logger.info(
+    "preflight",
+    extra={
+        "preflight": {
+            "app_env": settings.app_env,
+            "env_files": RESOLVED_ENV_FILES,
+            "engine": _engine_mode(),
+            "voice": "elevenlabs" if settings.elevenlabs_api_key else "browser_fallback",
+            "assistant": "llm" if settings.assistant_api_key else "deterministic",
+            "trust_proxy_headers": settings.trust_proxy_headers,
+        }
+    },
+)
 
 
 @app.get("/")

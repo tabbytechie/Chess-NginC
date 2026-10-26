@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthProvider } from '../app/AuthContext';
 import { ApiError, api } from '../lib/api-client';
-import type { ReviewResponse } from '../lib/api-types';
+import type { ReviewResponse, VoiceOption, VoicePreferences } from '../lib/api-types';
 import * as settings from '../lib/settings';
 import ReviewPage from './ReviewPage';
 
@@ -79,9 +79,18 @@ function review(overrides: Partial<ReviewResponse> = {}): ReviewResponse {
   };
 }
 
-function renderReview(path = '/games/7/review') {
+function renderReview(
+  path = '/games/7/review',
+  voices: VoiceOption[] = [],
+  prefs: VoicePreferences = { voice_authorized: false, voice_id: '' },
+) {
   const user = userEvent.setup();
   vi.spyOn(api, 'me').mockResolvedValue({ id: 1, email: 'a@b.co', points: 0 });
+  // The narration voice picker loads the free catalog + stored preference on
+  // mount; both are defaulted here so no test reaches the network, and the
+  // picker tests pass an explicit catalog to exercise the ElevenLabs options.
+  vi.spyOn(api, 'listVoices').mockResolvedValue({ voices });
+  vi.spyOn(api, 'getVoicePrefs').mockResolvedValue(prefs);
   const view = render(
     <MemoryRouter initialEntries={[path]}>
       <AuthProvider>
@@ -469,7 +478,7 @@ describe('ReviewPage tour (REVIEW-007/008/009)', () => {
     // Without speechSynthesis: fetch exists, so voiceAvailable() is true (TTS path).
     const withoutSpeech = renderReview();
     await withoutSpeech.findByText('Move 1 of 2');
-    expect(screen.getByRole('button', { name: /voice/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /voice on|voice off/i })).toBeInTheDocument();
     withoutSpeech.unmount();
     cleanup();
 
@@ -490,5 +499,52 @@ describe('ReviewPage tour (REVIEW-007/008/009)', () => {
 
     cleanup();
     expect(cancel).toHaveBeenCalled();
+  });
+});
+
+describe('ReviewPage narration voice picker (REVIEW-009)', () => {
+  afterEach(() => cleanup());
+
+  it('leads with an ElevenLabs free voice (Adam) and offers only ElevenLabs', async () => {
+    vi.spyOn(api, 'getGameReview').mockResolvedValue(review());
+    const { user } = renderReview('/games/7/review', [
+      { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', engine: 'eleven', available: true },
+      { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', engine: 'eleven', available: true },
+    ]);
+
+    // Adam is the main narrator even with no stored preference.
+    const trigger = await screen.findByRole('button', { name: 'Review narration voice' });
+    expect(within(trigger).getByText('Adam')).toBeInTheDocument();
+
+    await user.click(trigger);
+    const menu = await screen.findByRole('listbox', { name: 'Review narration voice' });
+    expect(within(menu).getByRole('option', { name: /George/ })).toBeInTheDocument();
+    // The review picker never lists browser voices or a "system default" reset.
+    expect(within(menu).queryByText('Browser voices')).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('option', { name: /System default/ })).not.toBeInTheDocument();
+
+    // Picking a free voice applies it to the narrator and persists it (REVIEW-009).
+    const save = vi.spyOn(api, 'saveVoicePrefs').mockResolvedValue({
+      voice_authorized: false,
+      voice_id: 'JBFqnCBsd6RMkjVDRZzb',
+    });
+    await user.click(within(menu).getByRole('option', { name: /George/ }));
+    expect(save).toHaveBeenCalledWith({ voice_id: 'JBFqnCBsd6RMkjVDRZzb' });
+    expect(
+      screen.queryByRole('listbox', { name: 'Review narration voice' }),
+    ).not.toBeInTheDocument();
+    expect(within(trigger).getByText('George')).toBeInTheDocument();
+  });
+
+  it('marks a free voice unavailable when no key is configured', async () => {
+    vi.spyOn(api, 'getGameReview').mockResolvedValue(review());
+    renderReview('/games/7/review', [
+      { id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', engine: 'eleven', available: false },
+    ]);
+
+    const trigger = await screen.findByRole('button', { name: 'Review narration voice' });
+    fireEvent.click(trigger);
+    const option = await screen.findByRole('option', { name: /Adam/ });
+    expect(option).toBeDisabled();
   });
 });

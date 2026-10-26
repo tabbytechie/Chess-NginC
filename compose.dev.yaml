@@ -25,5 +25,5 @@ services:
       stockfish_api_key: ${STOCKFISH_API_KEY:-}
       stockfish_api_base_url: ${STOCKFISH_API_BASE_URL:-https://stockfishapi.com/v1}
       elevenlabs_api_key: ${ELEVENLABS_API_KEY:-}
-      elevenlabs_voice_id: ${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+      elevenlabs_voice_id: ${ELEVENLABS_VOICE_ID:-pNInz6obpgDQGcFmaJgB}
       elevenlabs_model_id: ${ELEVENLABS_MODEL_ID:-eleven_flash_v2_5}

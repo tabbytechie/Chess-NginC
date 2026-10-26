@@ -23,6 +23,25 @@ FastAPI application (api)
            transactions · migrations · indexes · constraints
 ```
 
+## Data model (ER)
+
+```mermaid
+erDiagram
+    USERS ||--o{ SESSIONS : "opaque DB tokens"
+    USERS ||--o{ GAME_PLAYERS : plays
+    GAME_PLAYERS }o--|| GAMES : ""
+    GAMES ||--o{ GAME_MOVES : plies
+    GAMES ||--o{ GAME_REVIEWS : "one per game+player"
+    GAMES ||--o{ POINT_AWARDS : ledger
+    USERS ||--o{ POINT_AWARDS : earns
+    USERS ||--o{ USER_ACHIEVEMENTS : unlocks
+    USERS ||--o{ COACH_INDEX : "FTS projection"
+    USERS ||--o{ ENGINE_RUNS : ""
+    ENGINE_RUNS ||--o{ BENCHMARK_RESULTS : ""
+    BENCHMARK_RUNS ||--o{ BENCHMARK_RESULTS : ""
+    USERS ||--o{ PASSWORD_RESET_TOKENS : ""
+```
+
 ## Module responsibilities
 
 | Module | Owns | Must NOT own |

@@ -49,7 +49,7 @@ services:
       smtp_from: ${SMTP_FROM:-}
       # ElevenLabs TTS proxy (empty key = browser speechSynthesis fallback).
       elevenlabs_api_key: ${ELEVENLABS_API_KEY:-}
-      elevenlabs_voice_id: ${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+      elevenlabs_voice_id: ${ELEVENLABS_VOICE_ID:-pNInz6obpgDQGcFmaJgB}
       elevenlabs_model_id: ${ELEVENLABS_MODEL_ID:-eleven_flash_v2_5}
     ports:
       - "${API_PORT:-8000}:8000"

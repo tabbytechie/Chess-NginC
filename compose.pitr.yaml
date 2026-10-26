@@ -1,0 +1,41 @@
+# Optional PITR override — streaming WAL archiving on top of the base compose.
+#
+#   docker compose -f compose.yaml -f compose.pitr.yaml up -d db
+#   mkdir -p wal-archive           # host dir Postgres copies WAL segments into
+#
+# Turns the single `db` into a PITR-capable primary: every WAL segment is copied
+# to ./wal-archive as it fills. Combined with a base backup
+# (scripts/pitr-basebackup.sh), you can recover to ANY instant — not just the
+# last nightly dump — which is what item 2 ("if a day of lost games matters")
+# buys you. This file is deliberately separate so the default stack stays
+# exactly as it is until you opt in.
+#
+# Caveats:
+#   * ./wal-archive MUST ship off-host to mean anything (rclone/S3 on a schedule)
+#     — WAL on the same disk as the data is one failure domain, not two.
+#   * On Linux the bind dir must be writable by the container's postgres uid
+#     (999): `sudo chown -R 999:999 wal-archive`. Docker Desktop (macOS) shares
+#     it permissively and needs nothing.
+#   * For real production use prefer pgBackRest (see pgbackrest.conf.example):
+#     encryption, retention and incremental backups come built in.
+#
+# NOTE: the `volumes` list is re-declared in full because Compose replaces
+# (does not append) sequence overrides — dropping `pgdata` here would stop the
+# database from persisting.
+services:
+  db:
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test -d /wal_archive || mkdir /wal_archive; cp %p /wal_archive/%f
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./backups:/backups
+      - ./wal-archive:/wal_archive
+
+volumes:
+  pgdata:
