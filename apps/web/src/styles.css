@@ -1962,6 +1962,165 @@ html[data-theme='dark'] .captured-piece {
   }
 }
 
+/* ---------- voice picker (REVIEW-009 narration + coach voice) ------------ */
+
+/* The coach's voice bar: consent on one side, the picker on the other, in a
+   soft panel so it reads as one setting rather than two loose controls. */
+.coach-voice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.coach-voice-consent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.coach-voice-consent input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* A chip trigger that mirrors .toggle-chip so the voice family stays alike. */
+.voice-picker {
+  position: relative;
+  display: inline-block;
+}
+.voice-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  max-width: 15rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--transition),
+    color var(--transition);
+}
+.voice-trigger:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.voice-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.voice-trigger-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-trigger-caret {
+  flex: none;
+  transition: transform var(--transition);
+}
+.voice-trigger-caret.open {
+  transform: rotate(180deg);
+}
+
+/* Themed popover replacing the OS-native <select> popup. */
+.voice-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 15rem;
+  max-width: min(21rem, calc(100vw - 2rem));
+  max-height: 16rem;
+  padding: var(--space-1);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+.voice-group {
+  display: grid;
+  gap: 2px;
+}
+.voice-group-label {
+  padding: 6px 8px 2px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.voice-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.voice-option:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.voice-option.selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.voice-option:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+.voice-option-mark {
+  flex: none;
+  color: var(--accent);
+}
+.voice-option-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-option-hint {
+  flex: none;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+.voice-option-check {
+  flex: none;
+  color: var(--accent);
+}
+.voice-empty {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 0.82rem;
+  color: var(--ink-faint);
+}
+
 /* ---------- achievements (ACH-005/006/007) ---------------------------- */
 
 /* Rarity accent per band: the tile ring, its icon and the toast all read it

@@ -33,11 +33,17 @@ import CoachAssistant from '../components/CoachAssistant';
 import EvalGraph from '../components/EvalGraph';
 import ReviewThinking from '../components/ReviewThinking';
 import VoiceToggle from '../components/VoiceToggle';
+import VoicePicker, { type VoicePickerOption } from '../components/VoicePicker';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useAchievementRide } from '../app/useAchievementRide';
 import { ApiError, api } from '../lib/api-client';
-import type { AssistantLineStep, ReviewMoveResponse, ReviewResponse } from '../lib/api-types';
+import type {
+  AssistantLineStep,
+  ReviewMoveResponse,
+  ReviewResponse,
+  VoiceOption,
+} from '../lib/api-types';
 import { narratePly } from '../lib/narration';
 import {
   QUALITY_ORDER,
@@ -49,7 +55,13 @@ import {
   winPctFor,
 } from '../lib/review';
 import { getPref } from '../lib/settings';
-import { speak, stopSpeaking } from '../lib/voice';
+import { setVoiceSelection, speak, stopSpeaking } from '../lib/voice';
+
+// The Review leads with an ElevenLabs free voice (Adam) as the main narrator;
+// the browser engine is only the automatic fallback inside `speak()` (a 503 when
+// no key is configured, or a quota/network error). This id is the first entry of
+// the server's curated free-voice catalog (Adam synthesizes on the free plan).
+const REVIEW_DEFAULT_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'; // Adam
 
 /** Where the tour starts: the first move, so the game is seen from its opening. */
 function initialPly(data: ReviewResponse): number | null {
@@ -99,6 +111,10 @@ export default function ReviewPage() {
     title: string;
   } | null>(null);
   const [lessonPlaying, setLessonPlaying] = useState(false);
+  // Review narration voice: only the ElevenLabs free catalog is offered here,
+  // Adam as the default main voice (the browser engine stays the fallback).
+  const [elevenVoices, setElevenVoices] = useState<VoiceOption[]>([]);
+  const [reviewVoiceId, setReviewVoiceId] = useState(REVIEW_DEFAULT_VOICE_ID);
 
   const exitLesson = useCallback(() => {
     setLesson(null);
@@ -224,6 +240,41 @@ export default function ReviewPage() {
   // Leaving the review must not leave a voice talking over the next page.
   useEffect(() => () => stopSpeaking(), []);
 
+  // Load the free-voice catalog and seed the narrator with an ElevenLabs voice,
+  // defaulting to Adam when the player has no stored preference yet. Degrades
+  // quietly: an offline backend leaves the default selection, and `speak()` falls
+  // back to the browser engine the moment ElevenLabs cannot serve.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [catalog, prefs] = await Promise.all([api.listVoices(), api.getVoicePrefs()]);
+        if (!alive) return;
+        const ids = new Set(catalog.voices.map((v) => v.id));
+        const chosen = ids.has(prefs.voice_id) ? prefs.voice_id : REVIEW_DEFAULT_VOICE_ID;
+        setElevenVoices(catalog.voices);
+        setReviewVoiceId(chosen);
+        setVoiceSelection({ engine: 'eleven', id: chosen });
+      } catch {
+        if (!alive) return;
+        setVoiceSelection({ engine: 'eleven', id: REVIEW_DEFAULT_VOICE_ID });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // The picker only ever yields an ElevenLabs free id; apply it to the narrator
+  // now and persist it so the choice follows the account to the coach too.
+  function chooseReviewVoice(id: string) {
+    setReviewVoiceId(id);
+    setVoiceSelection({ engine: 'eleven', id });
+    void api.saveVoicePrefs({ voice_id: id }).catch(() => {
+      /* optimistic: the selection still applies to this session */
+    });
+  }
+
   async function reanalyse() {
     setLoading(true);
     try {
@@ -307,6 +358,17 @@ export default function ReviewPage() {
   const familyPct = selected ? openingAverage(review.moves, family, heroSide) : null;
   const isFirst = cursor <= 0;
   const isLast = cursor >= review.moves.length - 1;
+  // Only the ElevenLabs free voices are offered in the review; before the
+  // catalog arrives, offer the default so the control is never empty.
+  const reviewVoiceOptions: VoicePickerOption[] =
+    elevenVoices.length > 0
+      ? elevenVoices.map((v) => ({
+          id: v.id,
+          name: v.name,
+          kind: 'eleven' as const,
+          available: v.available,
+        }))
+      : [{ id: REVIEW_DEFAULT_VOICE_ID, name: 'Adam', kind: 'eleven' as const, available: true }];
 
   return (
     <main id="main-content" className="review-page">
@@ -320,6 +382,12 @@ export default function ReviewPage() {
           Re-analyse
         </Button>
         <VoiceToggle />
+        <VoicePicker
+          label="Review narration voice"
+          value={reviewVoiceId}
+          options={reviewVoiceOptions}
+          onChange={chooseReviewVoice}
+        />
       </div>
 
       <div className="review-grid">

@@ -95,7 +95,7 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | DB-019 | Test stale-version conflicts | P0 | [x] | test_update_fen_version_check() (test_game_repository.py) |
 | DB-020 | Test migrations from empty DB | P1 | [x] | `146802a49aef` initial schema verified from empty DB (creates users, games, sessions, game_moves, engine_runs). |
 | DB-021 | Test upgrades from previous schema | P1 | [x] | Verified via downgrade→upgrade round-trip (`alembic downgrade base && alembic upgrade head`). |
-| DB-022 | Document backup & restore | P1 | [ ] | |
+| DB-022 | Document backup & restore | P1 | [x] | `docs/deployment.md` §4 covers dump→verify→restore, scheduling and opt-in PITR. |
 
 ---
 
@@ -300,8 +300,8 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | REL-001 | Production configuration | P1 | [x] | `Settings` in `core/database.py` (env-driven); `docs/deployment.md` §1 table; `.env.example`. |
 | REL-002 | Secret management | P0 | [x] | App refuses to start w/ placeholder `SECRET_KEY` in prod (verified); compose `:?` guards fail closed; `backups/`+`*.sql` gitignored. |
 | REL-003 | HTTPS | P0 | [x] | TLS terminates at reverse proxy (`apps/web/nginx.conf`, redirect ready); `COOKIE_SECURE=true` + exact `CORS_ORIGINS` (REL-012). Docs §3. |
-| REL-004 | DB backups | P1 | [x] | `scripts/backup-db.sh` — timestamped `pg_dump`, 14-backup retention (`BACKUP_KEEP`). |
-| REL-005 | Verify DB restoration | P1 | [x] | `scripts/restore-db.sh` creates target + prints row counts; verified QA-025 (game+moves intact). |
+| REL-004 | DB backups | P1 | [x] | `scripts/backup-db.sh` — compressed custom-format `pg_dump -Fc` + `.dump.meta` integrity sidecar (sha256/alembic/row counts); `DB_IN_CONTAINER` + `RCLONE_TARGET`; 14-backup retention. |
+| REL-005 | Verify DB restoration | P1 | [x] | `scripts/verify-backup.sh` restores the newest dump into a throwaway DB and asserts sha256 + alembic + row counts vs the sidecar (non-zero on mismatch); `restore-db.sh` handles `.dump`/`.sql`; `scripts/backup-cron.example` chains backup→verify nightly + monthly oldest-backup drill. |
 | REL-006 | Migrations as controlled deployment step | P1 | [x] | Compose `alembic upgrade head && uvicorn`; **fixed `env.py`** to honour `DATABASE_URL`/`database_url` (was hardcoded dev URL); CI `alembic check`. |
 | REL-007 | Health checks | P1 | [x] | `/api/v1/health` (liveness) + `/api/v1/ready` (DB probe); compose healthchecks; verified live. |
 | REL-008 | Structured logs | P1 | [x] | Single-line stdout logging in `core/database.py`; `LOG_LEVEL`; no secrets logged (QA-019). |
@@ -314,6 +314,7 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | REL-015 | Release notes | P1 | [x] | Docs §14: version 0.1.0, scope per phase, final status pointer. |
 | REL-016 | All P0/P1 issues resolved | P0 | [x] | P0/P1 REL items done; env.py migration bug found+fixed this phase; remaining are deferred P2/P3 (SEC-018/019, analysis UX). |
 | REL-017 | Publish final verified status | P1 | [x] | Summary below updated; all gates green (139 pytest, ruff, mypy, compose config, prod smoke). |
+| REL-018 | Point-in-time recovery (opt-in) | P2 | [x] | `compose.pitr.yaml` WAL archiving → `./wal-archive`; `scripts/pitr-basebackup.sh` + `scripts/pitr-restore.sh` (replays to any instant in a throwaway :5433 container, never over live); `pgbackrest.conf.example` for the prod path. Docs §4. |
 
 ---
 
@@ -519,5 +520,30 @@ Priorities: **P0** security/data integrity/build blockers/illegal moves · **P1*
 | FP-001..003 | Capture before launch: `think_ms`, salted `ip_hash`, `auth_events`, retention | P0 | [ ] | market-plan.md 12C-C1 |
 | FP-010..015 | `app/fairplay` detection signals + scoring + flags (hermetic) | P1 | [ ] | market-plan.md 12C-C2 |
 | FP-020..024 | Moderation queue, evidence page, verdicts, appeals, ban enforcement | P1 | [ ] | market-plan.md 12C-C3 |
+
+## Phase 13 — Robustness & Concurrency (closes the architecture-review weaknesses W1–W11)
+
+> Launch-hardening pass: [`docs/robustness-plan.md`](docs/robustness-plan.md).
+> **Stage 13A** (this pass) removes the two accidental ceilings (untuned pool +
+> connection held across the CPU batch) and the proxy-IP launch blocker, makes
+> the `.env` footgun self-diagnosing, adds an HTTP cache on the immutable review,
+> and splits the frontend bundle. 13B (review job queue), 13C (Redis scale-out) and
+> 13D (quality ceilings) stay trigger-gated to the same seams. Invariants held:
+> offline-hermetic tests green, 404-on-foreign unchanged, `check_*` signatures kept,
+> engine/voice/LLM each behind one seam.
+
+| ID | Requirement | Pri | Status | Evidence / Location |
+|----|-------------|-----|--------|---------------------|
+| RB-001 | Explicit DB pool geometry from settings (`pool_size`/`max_overflow`/`recycle`/`pre_ping`) | P1 | [x] | `core/database.py` settings + `create_engine(...)`; `tests/test_phase13_robustness.py::TestPoolGeometry` |
+| RB-002 | Release the DB connection across the review engine batch | P0 | [x] | `reviews/service.py`: replay→`commit()`→`analyse_plies` on scalars→short write; `_Ply` carries scalars; byte-identical payload + no-held-connection tests in `test_reviews.py::TestGenerateOrGetKernel` |
+| RB-003 | Startup preflight log (env file, engine/voice/assistant mode, no secret) | P2 | [x] | `main.py` `preflight` log line + `RESOLVED_ENV_FILES`; booleans/names only (QA-019) |
+| RB-004 | Trusted-proxy client IP for limiters (default OFF) | P0 | [x] | `deps.py::client_ip` + `trust_proxy_headers`/`trusted_proxy_cidrs`; spoof-guard tests in `test_phase13_robustness.py::TestClientIp`; TD-021 mitigated |
+| RB-005 | `ETag`/`Cache-Control` + `304` on `GET /review` | P2 | [x] | `games.py`: ETag = md5 of the exact served body (no memo, never stale across workers/annotation deploys); `test_reviews.py::TestReviewHttpCache` |
+| RB-006 | Lazy-route heavy pages (Review/Learn/Online/Lobby/Achievements) | P2 | [x] | `App.tsx` `React.lazy` + `Suspense`; build emits per-page chunks; `App.test.tsx` RB-006 test |
+| RB-007 | `uvicorn[standard]` (uvloop/httptools) | P3 | [ ] | TD-010; blocked on pinning the wheels in `requirements.txt` for py3.12-linux + re-verifying the hermetic container build |
+| RB-010..014 | Review job queue + eval cache (W4/W5/W6) | P1 | [ ] | robustness-plan.md 13B — trigger: any real game > ~40 plies |
+| RB-020..023 | Redis limiters/lobby/cloud-counter + achievement counters (W2/W7) | P1 | [ ] | robustness-plan.md 13C — trigger: a 2nd API replica (=RL-005/TD-012) |
+| RB-030..035 | Grading bands, book transit, hot-seat ledger, verified drills, pgvector, fair-play calibration (W9) | P2 | [ ] | robustness-plan.md 13D — each behind an existing seam |
+| RB-040 | Managed HA Postgres endpoint (RDS/Neon/Supabase/Cloud SQL) | P2 | [ ] | launch trigger — flip `database_url` to the provider's virtual endpoint (app already reconnects via one URL + `pool_pre_ping`; no code change); retire hand-rolled PITR once provider backups exist |
 
 > Statuses must be updated in this file only after the corresponding acceptance criteria are met and checks pass.

@@ -41,12 +41,38 @@ TLS terminates at the reverse proxy / load balancer in front of `web` + `api`:
 3. Set `COOKIE_SECURE=true` and exact `CORS_ORIGINS` (no wildcards with cookies).
 4. Verify: `curl -sI http://<host>` → `301`; `https://<host>` → `200`.
 
-## 4. Backups & restoration (REL-004/REL-005)
+## 4. Backups, restoration & PITR (REL-004/REL-005)
 
-- **Backup:** `./scripts/backup-db.sh` — timestamped `pg_dump` into `./backups/`,
-  keeps the newest 14 (`BACKUP_KEEP`). Schedule nightly via cron/scheduler.
-- **Restore:** `./scripts/restore-db.sh <backup.sql> [target_db]` — creates the
-  target, loads the dump, prints row counts. **Backup before restoring live.**
+An untested backup is not a backup, so the default path is dump **then verify**
+in one chain, with PITR as a separate opt-in for when losing a day of games is
+not acceptable.
+
+- **Backup:** `./scripts/backup-db.sh` writes a compressed custom-format dump
+  (`pg_dump -Fc`) to `./backups/<db>-<utc>.dump` **plus a `.dump.meta` sidecar**
+  (sha256, alembic version, core row counts captured at dump time). Keeps the
+  newest `BACKUP_KEEP` (default 14). `DB_IN_CONTAINER=1` dumps through the
+  compose `db` service (no local `pg_dump` needed); `RCLONE_TARGET=s3:…` pushes
+  the dump + sidecar off-host.
+- **Restore-test (run after every backup):** `./scripts/verify-backup.sh`
+  restores the newest (or named) dump into a throwaway DB and asserts sha256,
+  `alembic_version` and row counts match the sidecar, then drops it. Non-zero on
+  any mismatch — this is the check that makes the backup trustworthy.
+- **Restore for real:** `./scripts/restore-db.sh <backup.dump|.sql> [target_db]`
+  (`pg_restore` for `.dump`, `psql` for legacy `.sql`). **Backup before any live
+  restore.**
+- **Schedule:** `scripts/backup-cron.example` chains `backup-db.sh &&
+  verify-backup.sh` nightly, adds a weekly PITR base backup and a monthly
+  verify-from-the-oldest-backup drill. A monitor (healthchecks.io / cron mail)
+  on the job's exit code is the backup-failure alert counted in §8.
+- **Point-in-time recovery (opt-in):** `docker compose -f compose.yaml
+  -f compose.pitr.yaml` turns `db` into a WAL-archiving primary (streaming
+  `archive_command` → `./wal-archive`). Take a base backup
+  (`./scripts/pitr-basebackup.sh`; weekly suffices alongside continuous
+  archiving), then recover to any instant with
+  `PITR_TARGET="…" ./scripts/pitr-restore.sh` — it replays into a **throwaway
+  container on :5433**, never over the live DB. Ship `./wal-archive` off-host or
+  it buys nothing. For production prefer **pgBackRest**
+  (`pgbackrest.conf.example`): encryption, retention and incrementals built in.
 - Verified this release: 16 kB dump → restore preserved 1 game + 2 moves (QA-025).
 
 ## 5. Migrations as a controlled deployment step (REL-006)
@@ -177,7 +203,7 @@ Migrations run **before** the new code serves traffic, as an explicit step:
 - **App rollback:** redeploy the previous image tag; Compose `restart:
   unless-stopped` + the healthcheck gate the swap. Schema must be
   backward-compatible (expand/contract, §5) so old code runs on the new schema.
-- **Data rollback:** take a fresh backup, then `./scripts/restore-db.sh <backup.sql>`
+- **Data rollback:** take a fresh backup, then `./scripts/restore-db.sh <backup.dump>`
   into a scratch DB, verify row counts, and only then restore live.
 - **Order:** app rollback first (fast, reversible); data restore only if the
   migration corrupted data. Always backup before any live restore.

@@ -59,6 +59,12 @@ class JsonFormatter(logging.Formatter):
         access = getattr(record, "http_access", None)
         if isinstance(access, dict):
             entry["http"] = {k: access.get(k) for k in _ACCESS_KEYS}
+        # RB-003: the one boot-time structured line carries the resolved env
+        # files + engine/voice mode. Without this the fixed key set above would
+        # silently drop it and preflight would log nothing but its own name.
+        preflight = getattr(record, "preflight", None)
+        if isinstance(preflight, dict):
+            entry["preflight"] = preflight
         if record.exc_info:
             entry["exc"] = self.formatException(record.exc_info)
         return json.dumps(entry, default=str)

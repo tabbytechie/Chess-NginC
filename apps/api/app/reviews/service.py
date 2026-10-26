@@ -66,15 +66,23 @@ class ReviewTargetError(Exception):
 
 @dataclass(frozen=True)
 class _Ply:
-    """One replayed move with the chess facts needed to grade it."""
+    """One replayed move: the chess facts needed to grade it, plus the three
+    stored scalars the payload echoes.
 
-    row: GameMoveRow
+    RB-002: these are plain values, not the ORM row, on purpose — the review
+    analysis runs after the session has released its connection, and reading
+    a row attribute after that would silently re-acquire one.
+    """
+
     pre_fen: str
     mover: chess.Color
     move: chess.Move
     is_forced: bool
     was_checked: bool
     captures_value_cp: int
+    move_number: int
+    uci: str
+    san: str
 
 
 def _game_moves(db: Session, game_id: int) -> list[GameMoveRow]:
@@ -205,13 +213,15 @@ def _replay(moves: list[GameMoveRow]) -> tuple[list[_Ply], chess.Board]:
         board.push(move)
         plies.append(
             _Ply(
-                row=row,
                 pre_fen=pre_fen,
                 mover=mover,
                 move=move,
                 is_forced=is_forced,
                 was_checked=was_checked,
                 captures_value_cp=captures,
+                move_number=row.move_number,
+                uci=row.uci,
+                san=row.san,
             )
         )
     return plies, board
@@ -276,7 +286,16 @@ def _accuracy(losses: list[int]) -> int:
 def analyse_game(provider: EngineProvider, moves: list[GameMoveRow]) -> dict:
     """Classify every ply from the starting position; build the review payload."""
     plies, final_board = _replay(moves)
+    return analyse_plies(provider, plies, final_board)
 
+
+def analyse_plies(provider: EngineProvider, plies: list[_Ply], final_board: chess.Board) -> dict:
+    """Grade an already-replayed game (RB-002).
+
+    Takes the detached `_Ply` scalars, not ORM rows, so the caller can release
+    the DB connection across the seconds of engine work and hand the finished
+    payload to a short write transaction.
+    """
     # One search per position the game actually reached, from the mover's view.
     analyses = [_analyse(provider, ply.pre_fen, ply.mover) for ply in plies]
     # The position the last move left behind is searched only when play could
@@ -322,9 +341,9 @@ def analyse_game(provider: EngineProvider, moves: list[GameMoveRow]) -> dict:
         entries.append(
             {
                 "ply": index + 1,
-                "move_number": ply.row.move_number,
-                "uci": ply.row.uci,
-                "san": ply.row.san,
+                "move_number": ply.move_number,
+                "uci": ply.uci,
+                "san": ply.san,
                 # Position the move was played from: lets the review page put a
                 # board on any ply without re-deriving the replay client-side.
                 "pre_fen": ply.pre_fen,
@@ -350,7 +369,7 @@ def analyse_game(provider: EngineProvider, moves: list[GameMoveRow]) -> dict:
             improvements.append(
                 {
                     "ply": index + 1,
-                    "san": ply.row.san,
+                    "san": ply.san,
                     "color": color,
                     "best_uci": best.move,
                     "loss_cp": loss,
@@ -370,7 +389,14 @@ def analyse_game(provider: EngineProvider, moves: list[GameMoveRow]) -> dict:
 
 
 def generate_or_get(db: Session, game_id: int, user_id: int, *, force: bool = False) -> GameReview:
-    """The review endpoint kernel: cached read, else full engine analysis."""
+    """The review endpoint kernel: cached read, else full engine analysis.
+
+    RB-002: everything the session must read (ownership, moves, replay
+    validation) happens while connected, then ``db.commit()`` releases the
+    pooled connection for the seconds-long engine batch, and one short write
+    transaction persists the finished payload. A ~12 s held connection per
+    review becomes ~50 ms held plus the search on plain scalars.
+    """
     game = load_game(db, game_id, user_id)
     if game.status == GameStatus.ACTIVE.value:
         raise ReviewTargetError("The game is still in progress")
@@ -382,12 +408,17 @@ def generate_or_get(db: Session, game_id: int, user_id: int, *, force: bool = Fa
     if not repo_moves:
         raise ReviewTargetError("There are no moves to review")
 
-    # One row per (game, user): a forced re-analysis updates the stored row
-    # in place rather than violating the unique constraint.
-    review = stored if stored is not None else GameReview(game_id=game_id, user_id=user_id)
-    review.provider = "stockfish"
-    review.hero_color = hero_color_for(game, user_id)
-    review.depth = REVIEW_DEPTH
+    # Replay + validate while still connected (a bad stored move raises before
+    # the commit below, so nothing is half-written), and resolve every ORM-derived
+    # scalar up front — the objects go expired at the commit.
+    plies, final_board = _replay(repo_moves)
+    hero_color = hero_color_for(game, user_id)
+    db.commit()
+
+    payload: dict = {}
+    provider_name = "stockfish"
+    status = "failed"
+    error: str | None = None
     try:
         # One engine for the whole pass (ANL-003): starting a local Stockfish
         # costs a handshake plus an NNUE load, which used to be paid once per
@@ -397,18 +428,26 @@ def generate_or_get(db: Session, game_id: int, user_id: int, *, force: bool = Fa
         # MON-003: the histogram times the whole batch per provider — this is
         # the app's slowest surface and the one TD-013/ANL-008 sizing depends on.
         with open_stockfish_provider(for_review=True) as provider, engine_timer(provider.name):
-            payload = analyse_game(provider, repo_moves)
-        review.provider = provider.name
+            payload = analyse_plies(provider, plies, final_board)
+        provider_name = provider.name
+        status = "completed"
     except (EngineUnavailableError, StockfishUnavailableError) as exc:
         # MON-004: a stored failure is invisible to HTTP (the endpoint answers
         # 200 with status=failed), so the counter is the only sign of an outage.
         record_engine_unavailable()
-        review.status = "failed"
-        review.error = str(exc)
-        review.payload = {}
-    else:
-        review.status = "completed"
-        review.payload = payload
+        error = str(exc)
+
+    # Short write transaction: build the row from the plain scalars only, so
+    # no expired ORM object is read back into the connection window we just
+    # closed. One row per (game, user): a forced re-analysis updates the stored
+    # row in place rather than violating the unique constraint.
+    review = stored if stored is not None else GameReview(game_id=game_id, user_id=user_id)
+    review.provider = provider_name
+    review.hero_color = hero_color
+    review.depth = REVIEW_DEPTH
+    review.status = status
+    review.error = error
+    review.payload = payload if status == "completed" else {}
     db.add(review)
     db.commit()
     db.refresh(review)

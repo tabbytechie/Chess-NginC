@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Generator
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine
@@ -22,6 +23,23 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://tabbymichael@localhost:5432/chess"
     secret_key: str = "change-me-in-development-only"
     cookie_secure: bool = False
+    # RB-001: the pool used to be SQLAlchemy's blind default (5 + 10 overflow,
+    # no pre-ping, connections kept forever). Sized explicitly for the
+    # single-replica topology (D6): 5 kept + 5 spilled = 10 per process, well
+    # inside Postgres' 100 max_connections with room for the engine workers.
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    # Seconds before a checked-in connection is recycled — under any
+    # load-balancer / server idle timeout, so the pool never hands out a socket
+    # the far end has already closed.
+    db_pool_recycle: int = 300
+    # RB-004 (TD-021): per-IP limiting reads `request.client.host`, which is the
+    # reverse proxy's address for every real visitor. Off by default = today's
+    # behavior byte-for-byte; turn on only when the API genuinely sits behind a
+    # proxy whose address is inside `trusted_proxy_cidrs` (leftmost XFF hop wins
+    # for a trusted peer, XFF is ignored for an untrusted one — spoof guard).
+    trust_proxy_headers: bool = False
+    trusted_proxy_cidrs: str = ""
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     session_ttl_hours: int = 24 * 7  # 7 days
     auth_rate_limit_per_minute: int = 10
@@ -79,10 +97,13 @@ class Settings(BaseSettings):
     # ElevenLabs TTS proxy (optional; free tier = 10k chars/month). Empty key
     # means the browser's speechSynthesis fallback is used instead. Never
     # commit a real key — the API endpoint is server-side only (the browser
-    # never sees this value). Default voice/model are among the free-tier
-    # premium voices; swap via ELEVENLABS_VOICE_ID / ELEVENLABS_MODEL_ID.
+    # never sees this value). The default voice is one of the curated free-tier
+    # ElevenLabs premade voices (Adam); swap via ELEVENLABS_VOICE_ID / MODEL_ID.
+    # Adam/George synthesize through the API on a free plan; the shared "library"
+    # voice Rachel is rejected with 402 paid_plan_required there, so it is not the
+    # default (that choice is what made the browser silently fall back).
     elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = "pNInz6obpgDQGcFmaJgB"  # Adam (free-tier API accessible)
+    elevenlabs_voice_id: str = "pNInz6obpgDQGcFmaJgB"  # Adam (free-tier premade)
     elevenlabs_model_id: str = "eleven_flash_v2_5"
     # MON-001: JSON lines are the default; false restores the text format.
     log_json: bool = True
@@ -91,6 +112,17 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# RB-003: which .env the settings actually came from. `env_file=".env"` is
+# CWD-relative — starting uvicorn from the repo root silently reads a different
+# file than starting it from apps/api, which is the repeat configuration trap.
+# The preflight line in main.py prints this so the answer is visible at boot.
+_env_file_config = Settings.model_config.get("env_file") or ()
+if isinstance(_env_file_config, (str, Path)):
+    _env_file_config = (_env_file_config,)
+RESOLVED_ENV_FILES: list[str] = [
+    str(path) for path in _env_file_config if path and Path(path).is_file()
+]
 
 if settings.app_env == "production" and settings.secret_key == "change-me-in-development-only":
     raise RuntimeError("REFUSE TO START: set a unique SECRET_KEY in production (REL-002).")
@@ -108,8 +140,17 @@ class Base(DeclarativeBase):
     pass
 
 
-# Create engine
-engine = create_engine(settings.database_url, echo=False)
+# Create engine (RB-001: explicit pool geometry — the defaults were never
+# chosen, just inherited; pre_ping turns a server restart into one reconnect
+# instead of a wave of 500s on stale sockets).
+engine = create_engine(
+    settings.database_url,
+    echo=False,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+    pool_recycle=settings.db_pool_recycle,
+    pool_pre_ping=True,
+)
 
 # Create session factory
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)

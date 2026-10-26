@@ -1,9 +1,11 @@
 """Games endpoints: CRUD + moves + resign/draw/engine (API-005..012)."""
 
+import hashlib
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
+from starlette.responses import Response
 
 from app.api.v1.achievements import celebrate, celebrate_at_end
 from app.api.v1.deps import (
@@ -259,6 +261,20 @@ _REVIEW_RESPONSES: dict[int | str, dict[str, object]] = {
 }
 
 
+# RB-005: the GET validator is a digest of the exact bytes served, so it is
+# structurally impossible to go stale — it changes the moment a force re-run
+# rewrites the payload *or* a deploy shifts a read-time annotation. There is no
+# in-process memo: recomputing an md5 over a body already serialized for the
+# response is negligible, and a memo would leak one worker's view to another
+# the day the API runs with more than one process.
+def _review_etag(body: str) -> str:
+    """Content digest of the served review body, as an HTTP validator value.
+
+    MD5 here is a cache validator, not a security boundary.
+    """
+    return hashlib.md5(body.encode()).hexdigest()
+
+
 @router.post(
     "/games/{game_id}/review",
     response_model=ReviewResponse,
@@ -293,10 +309,17 @@ def create_game_review(
 )
 def get_game_review(
     game_id: int,
+    request: Request,
     current_user: Annotated[User, _CurrentUser],
     db: Annotated[Session, _DbSession],
-) -> ReviewResponse:
-    """Return the caller's stored review without re-running the engine (REVIEW-005)."""
+) -> ReviewResponse | Response:
+    """Return the caller's stored review without re-running the engine (REVIEW-005).
+
+    RB-005: the response carries a content ETag, so a conditional GET on an
+    unchanged review answers 304 and skips sending the (possibly large) JSON
+    over the wire. `private, no-cache` keeps shared caches off a per-user body
+    while allowing browser revalidation.
+    """
     try:
         # Access check shared with POST: unknown/foreign games → 404.
         review_service.load_game(db, game_id, current_user.id)
@@ -308,4 +331,14 @@ def get_game_review(
             status_code=status.HTTP_409_CONFLICT,
             detail="No review exists yet for this game",
         )
-    return to_review_response(review)
+    # Serialize once, then digest the exact bytes served so the validator can
+    # never drift from the body — read-time annotations included (RB-005).
+    body = to_review_response(review).model_dump_json()
+    etag = f'"{_review_etag(body)}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "private, no-cache"},
+    )

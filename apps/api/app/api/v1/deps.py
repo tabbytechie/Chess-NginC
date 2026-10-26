@@ -1,5 +1,6 @@
 """Shared API dependencies: current-user resolution and auth rate limiting."""
 
+import ipaddress
 import math
 import time
 from collections import defaultdict
@@ -40,11 +41,65 @@ def _retry_after(seconds_left: float) -> dict[str, str]:
     return {"Retry-After": str(max(1, math.ceil(seconds_left)))}
 
 
+def _trusted_proxy_nets() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse `trusted_proxy_cidrs` once per call (a settings string, comma-
+    separated; invalid entries are skipped rather than shutting the limiter).
+    """
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for chunk in settings.trusted_proxy_cidrs.split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def client_ip(request: Request) -> str:
+    """The address a per-client limiter should key on (RB-004, TD-021).
+
+    Off by default, which is byte-for-byte the old behavior: the direct peer.
+    With `TRUST_PROXY_HEADERS` on and the direct peer inside a trusted CIDR,
+    walk `X-Forwarded-For` from the right and return the closest hop that is
+    *not itself* a trusted proxy (nginx `real_ip_recursive` semantics). Each
+    proxy appends the address it saw, so the rightmost non-proxy hop is the
+    real client; the leftmost value is one a client can prepend and forge, so
+    it is never trusted outright. With trust on but an untrusted peer, XFF is
+    *ignored* — a direct client must never mint free limiter buckets. Values
+    that are not parseable IPs fall back to the peer.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if not settings.trust_proxy_headers:
+        return peer
+    nets = _trusted_proxy_nets()
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_addr in net for net in nets):
+        return peer
+    forwarded = request.headers.get("x-forwarded-for", "")
+    for token in reversed(forwarded.split(",")):
+        candidate = token.strip()
+        if not candidate:
+            continue
+        try:
+            addr = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if any(addr in net for net in nets):
+            continue  # an inner trusted hop; keep walking toward the client
+        return candidate
+    return peer
+
+
 def rate_limit_auth(request: Request) -> None:
     """Allow N auth attempts per minute per client IP (SEC-012)."""
     now = time.monotonic()
     window_start = now - 60.0
-    key = request.client.host if request.client else "unknown"
+    key = client_ip(request)
     hits = [t for t in _rate_buckets[key] if t > window_start]
     _rate_buckets[key] = hits
     if len(hits) >= settings.auth_rate_limit_per_minute:

@@ -53,4 +53,10 @@ pgdata/
 
 # --- DB backups (may contain user data; never commit) ---
 backups/
+wal-archive/
+pitr-recovery/
 *.sql
+*.dump
+*.dump.meta
+*.tar
+*.tar.gz
