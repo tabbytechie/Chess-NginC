@@ -1573,3 +1573,54 @@ refresh to drop the old cached shell; after that, future rebuilds load automatic
 
 
 
+
+---
+
+## Session 2026-10-31 — Landing: the "descent" scroll (React + Tailwind, black + green)
+
+**Task.** Build a marketing landing page in the style of the "Hollowmere" Halloween descent
+scroll (five stacked full-bleed illustrated scenes joined by drawn rock seams, canvas waterfalls,
+particle systems, cursor-reactive sprites, eased momentum scrolling) re-skinned to a black +
+green palette with Chess NginC copy, in React + Tailwind.
+
+**Files changed.**
+- `apps/web` deps: added `tailwindcss` + `@tailwindcss/vite` (devDependencies); `vite.config.ts`
+  registers the Tailwind plugin.
+- `apps/web/src/landing/` (new): `LandingPage.tsx` (assembly + copy), `landing.css` (Tailwind
+  theme/utilities layers **without preflight** — the app's `styles.css` keeps ownership of global
+  resets — plus scene tokens, glow/mist keyframes, canvas masks, nav, responsive +
+  reduced-motion rules), `data.ts` (Higgsfield asset URLs, seam bands, sprite-sheet crops,
+  per-scene overlay placements), `effects.ts` (shared rAF ticker, waterfall streak renderer,
+  five particle systems, all in the green palette), `canvases.tsx` (viewport-gated React canvas
+  wrappers), `sprites.tsx` (ghosts with cursor repulsion; CSS-flighted bats), `motion.ts` (eased
+  momentum scroll over a fixed scroller, hero parallax + title spread, WAAPI load intro,
+  line-by-line reveals, cursor lantern, manual anchor scrolling, mobile focus-crop layout),
+  `pointer.ts` (cursor singleton).
+- `apps/web/src/App.tsx`: `/` now renders `HomeRoute` — the landing descent for signed-out
+  visitors, the dashboard for signed-in ones; app header/footer step aside while the landing is
+  on screen (it owns its own nav and ends on the finale scene, no footer).
+- `apps/web/index.html`: added Oswald (variable) beside Inter for the hero display type.
+- `apps/web/src/App.test.tsx`: the unauthenticated `/` expectation changed from "redirects to
+  login" to "renders the landing" (heading `CHESS NGINC`, two Sign-up links).
+
+**Tests executed.** `tsc --noEmit` ✓, `eslint .` ✓, `vitest run` full frontend suite —
+**262/262 passed**, `vite build` ✓. Dev server on :5173 for manual viewing.
+
+**Defects discovered / handled.**
+- jsdom (vitest env) has no canvas 2D context, no IntersectionObserver, no WAAPI and no
+  `matchMedia`; the whole landing is guarded to degrade to a static, revealed render there.
+- Anchor links cannot use native `#` jumping inside the transformed fixed scroller — clicks are
+  intercepted and `window.scrollTo` is driven manually (the eased loop provides the glide).
+- The painted art is violet/indigo; the green theme is applied via `hue-rotate(-118deg)` +
+  saturation filters on the scene/seam/sprite layers plus green-drawn canvas effects.
+
+**Decisions made.**
+- Tailwind v4 imported as `theme` + `utilities` layers only (no preflight) so existing app styles
+  are untouched; bespoke effect layers (masks, blend modes, keyframes) stay plain CSS.
+- Landing at `/` for signed-out visitors (SaaS marketing entry) instead of redirecting straight
+  to `/login`; copy mirrors in-app wording ("Play online", "Learn", "Achievements",
+  "Move-by-move classification", "play the position, not the clock").
+
+**Remaining work.** Real-device pass on the hue-rotated art (a per-asset green re-render would
+replace the filter if desired); wire CI to `npm ci` the new devDependencies (lockfile updated);
+`compose.yaml` web image rebuild picks the landing up automatically.

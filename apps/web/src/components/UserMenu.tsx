@@ -35,7 +35,9 @@ export default function UserMenu() {
   async function handleLogout() {
     setOpen(false);
     await logout();
-    navigate('/login', { replace: true });
+    // Signed out, `/` is the landing descent — leave visitors at the front
+    // door, not at the login form.
+    navigate('/', { replace: true });
   }
 
   return (

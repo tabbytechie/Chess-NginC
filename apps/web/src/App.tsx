@@ -1,19 +1,22 @@
 /**
  * Application shell and routes (WEB-004).
- * Public: /login, /register, /forgot-password, /reset-password.
+ * Public: / (landing descent for signed-out visitors), /login, /register,
+ * /forgot-password, /reset-password.
  * Protected: dashboard + game pages.
  * Header: brand + nav left, theme switcher and account menu right;
- * logout lives in the account menu, not in page content.
+ * logout lives in the account menu, not in page content. The landing page
+ * owns its own nav, so the app header and footer step aside for it.
  * RB-006: the four pages behind top-level navigation are code-split; the
  * dashboard's first paint no longer pays for the review/coach/drill UI.
  */
 import { Suspense, lazy, type ReactNode } from 'react';
-import { Link, NavLink, Route, Routes } from 'react-router-dom';
+import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 
 import RequireAuth from './app/RequireAuth';
 import { useAuth } from './app/useAuth';
 import ThemeToggle from './components/ThemeToggle';
 import UserMenu from './components/UserMenu';
+import LandingPage from './landing/LandingPage';
 import Dashboard from './pages/Dashboard';
 import GamePage from './pages/GamePage';
 import { ForgotPasswordPage, LoginPage, RegisterPage, ResetPasswordPage } from './pages/AuthPages';
@@ -28,6 +31,18 @@ function RouteFallback() {
   // Distinct from AuthContext's "Loading…" (session restoration) so the two
   // waiting states never read as each other.
   return <div className="loading-state">Loading page…</div>;
+}
+
+/**
+ * `/` is the marketing landing descent for signed-out visitors and the
+ * dashboard for signed-in ones; the session-restoration wait keeps the
+ * RequireAuth "Loading…" wording so the two loading states stay identical.
+ */
+function HomeRoute() {
+  const { user, loading } = useAuth();
+  if (loading) return <p role="status">Loading…</p>;
+  if (!user) return <LandingPage />;
+  return <Dashboard />;
 }
 
 function guarded(node: ReactNode) {
@@ -102,25 +117,23 @@ function Header() {
 }
 
 export default function App() {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  // The landing owns its own nav and ends on the finale scene — no app
+  // header, no footer while it is on screen.
+  const landing = location.pathname === '/' && !loading && !user;
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <Header />
+      {!landing && <Header />}
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
-        <Route
-          path="/"
-          element={
-            <RequireAuth>
-              <Dashboard />
-            </RequireAuth>
-          }
-        />
+        <Route path="/" element={<HomeRoute />} />
         <Route
           path="/games/:id"
           element={
@@ -143,7 +156,7 @@ export default function App() {
           }
         />
       </Routes>
-      <footer className="app-footer">Chess NginC — play the position, not the clock.</footer>
+      {!landing && <footer className="app-footer">Chess NginC — play the position, not the clock.</footer>}
     </div>
   );
 }
