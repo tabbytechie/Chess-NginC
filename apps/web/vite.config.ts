@@ -1,9 +1,26 @@
 /// <reference types="vitest/config" />
+import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [tailwindcss(), react()],
+  server: {
+    // Dev parity with the prod nginx (apps/web/nginx.conf): same-origin /api
+    // calls so the session-cookie auth flow works on the dev server too.
+    // Without this, POST /api/v1/auth/login hits Vite's fallback (404) and
+    // every login fails outside the Docker web container.
+    proxy: {
+      '/api': {
+        // compose.yaml publishes the API as ${API_PORT:-8000}:8000; @types/node
+        // is not a devDep here, so process.env access stays unwired — override
+        // the target by editing this line if you run the API on a different port.
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        ws: true, // online-play WebSocket endpoint lives under /api/v1/online/ws
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],

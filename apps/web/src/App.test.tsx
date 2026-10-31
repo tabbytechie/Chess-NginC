@@ -23,10 +23,12 @@ function renderApp(path = '/') {
 }
 
 describe('App routing (WEB-004/005/006/008)', () => {
-  it('redirects unauthenticated users from / to the login page', async () => {
+  it('shows the landing descent to unauthenticated visitors at /', async () => {
     vi.spyOn(api, 'me').mockRejectedValueOnce(new Error('nope'));
     renderApp('/');
-    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'CHESS NGINC' })).toBeInTheDocument();
+    // the nav ticket box and the finale CTA both offer sign up
+    expect((await screen.findAllByRole('link', { name: 'Sign up' })).length).toBeGreaterThan(1);
   });
 
   it('shows a session-restoration loading state before /auth/me resolves', () => {
@@ -47,6 +49,21 @@ describe('App routing (WEB-004/005/006/008)', () => {
     expect(await screen.findByText('a@b.co')).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: 'Your Games' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Achievements' })).toBeInTheDocument();
+  });
+
+  it('returns to the landing descent after logging out', async () => {
+    vi.spyOn(api, 'me').mockResolvedValueOnce({ id: 1, email: 'a@b.co', points: 0 });
+    vi.spyOn(api, 'listGames').mockResolvedValueOnce([]);
+    vi.spyOn(api, 'listAchievements').mockResolvedValueOnce({ total: 0, unlocked: 0, items: [] });
+    const logout = vi.spyOn(api, 'logout').mockResolvedValue(undefined);
+    const { user } = renderApp('/');
+
+    await user.click(await screen.findByRole('button', { name: /a@b\.co/ }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Log out' }));
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    // context user goes null; `/` re-renders as the landing for the visitor
+    expect(await screen.findByRole('heading', { name: 'CHESS NGINC' })).toBeInTheDocument();
   });
 
   it('logs in from the login form and lands on the dashboard', async () => {
